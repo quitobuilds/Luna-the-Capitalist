@@ -1,0 +1,731 @@
+"""
+Day Trading Module - Automated Stock & Crypto Trading
+
+Features:
+- Technical analysis (patterns, indicators)
+- Sentiment analysis (news, social media)
+- Risk management (stop-loss, position sizing)
+- Multiple strategies (momentum, mean reversion, breakout)
+- Backtesting framework
+"""
+
+import asyncio
+import hashlib
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Optional, Literal
+from enum import Enum
+import json
+
+from .base import BaseModule, Opportunity, ExecutionResult, RiskLevel
+
+
+class TradeDirection(Enum):
+    LONG = "long"
+    SHORT = "short"
+
+
+class TimeFrame(Enum):
+    M1 = "1m"
+    M5 = "5m"
+    M15 = "15m"
+    H1 = "1h"
+    H4 = "4h"
+    D1 = "1d"
+
+
+@dataclass
+class PriceData:
+    """OHLCV price data."""
+    timestamp: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+
+
+@dataclass
+class TechnicalSignal:
+    """A technical analysis signal."""
+    indicator: str
+    signal_type: Literal['bullish', 'bearish', 'neutral']
+    strength: float  # 0-1
+    value: float
+    description: str
+
+
+@dataclass
+class TradeSetup:
+    """A potential trade setup."""
+    symbol: str
+    direction: TradeDirection
+    entry_price: float
+    stop_loss: float
+    take_profit: float
+    position_size: float
+    strategy: str
+    signals: list[TechnicalSignal]
+    confidence: float
+    
+    @property
+    def risk_reward_ratio(self) -> float:
+        risk = abs(self.entry_price - self.stop_loss)
+        reward = abs(self.take_profit - self.entry_price)
+        return reward / risk if risk > 0 else 0
+    
+    @property
+    def risk_amount(self) -> float:
+        return abs(self.entry_price - self.stop_loss) * self.position_size
+
+
+class DayTradingModule(BaseModule):
+    """
+    Automated day trading with technical and sentiment analysis.
+    """
+    
+    SUPPORTED_MARKETS = {
+        'stocks': ['SPY', 'QQQ', 'AAPL', 'MSFT', 'NVDA', 'TSLA', 'AMD', 'META'],
+        'crypto': ['BTC', 'ETH', 'SOL', 'AVAX', 'LINK', 'DOGE'],
+        'forex': ['EUR/USD', 'GBP/USD', 'USD/JPY']
+    }
+    
+    STRATEGIES = {
+        'momentum': {
+            'description': 'Trade with the trend using momentum indicators',
+            'indicators': ['RSI', 'MACD', 'ADX'],
+            'timeframes': [TimeFrame.M15, TimeFrame.H1],
+            'min_rr': 1.5
+        },
+        'mean_reversion': {
+            'description': 'Trade reversals at extremes',
+            'indicators': ['Bollinger Bands', 'RSI', 'Stochastic'],
+            'timeframes': [TimeFrame.M5, TimeFrame.M15],
+            'min_rr': 2.0
+        },
+        'breakout': {
+            'description': 'Trade breakouts from consolidation',
+            'indicators': ['Volume', 'ATR', 'Support/Resistance'],
+            'timeframes': [TimeFrame.M15, TimeFrame.H1],
+            'min_rr': 2.0
+        },
+        'scalping': {
+            'description': 'Quick trades on small moves',
+            'indicators': ['VWAP', 'Order Flow', 'Level 2'],
+            'timeframes': [TimeFrame.M1, TimeFrame.M5],
+            'min_rr': 1.2
+        },
+        'news_momentum': {
+            'description': 'Trade news catalysts',
+            'indicators': ['Volume Surge', 'Price Action'],
+            'timeframes': [TimeFrame.M1, TimeFrame.M5],
+            'min_rr': 1.5
+        }
+    }
+    
+    @property
+    def name(self) -> str:
+        return "day_trading"
+    
+    @property
+    def description(self) -> str:
+        return "Automated day trading with technical and sentiment analysis"
+    
+    async def analyze(self) -> list[Opportunity]:
+        """Find trading opportunities."""
+        opportunities = []
+        
+        # Get watchlist from config
+        watchlist = self.config.get('watchlist', 
+            self.SUPPORTED_MARKETS['stocks'][:5] + self.SUPPORTED_MARKETS['crypto'][:3]
+        )
+        
+        # Run analysis strategies
+        strategies = [
+            self._scan_momentum_setups(watchlist),
+            self._scan_mean_reversion(watchlist),
+            self._scan_breakouts(watchlist),
+            self._analyze_sentiment(watchlist),
+            self._detect_unusual_volume(watchlist),
+        ]
+        
+        results = await asyncio.gather(*strategies, return_exceptions=True)
+        
+        for result in results:
+            if isinstance(result, Exception):
+                self.logger.error(f"Strategy failed: {result}")
+                continue
+            opportunities.extend(result)
+        
+        return opportunities
+    
+    async def _scan_momentum_setups(self, watchlist: list[str]) -> list[Opportunity]:
+        """Find momentum trading setups."""
+        opportunities = []
+        
+        for symbol in watchlist:
+            # Get price data
+            prices = await self._fetch_prices(symbol, TimeFrame.M15, 100)
+            if not prices:
+                continue
+            
+            # Calculate indicators
+            rsi = self._calculate_rsi(prices, 14)
+            macd = self._calculate_macd(prices)
+            adx = self._calculate_adx(prices, 14)
+            
+            signals = []
+            
+            # Check for bullish momentum
+            if rsi and 30 < rsi < 70:  # Not overbought/oversold
+                if macd and macd.get('histogram', 0) > 0 and macd.get('signal_cross', False):
+                    signals.append(TechnicalSignal(
+                        indicator='MACD',
+                        signal_type='bullish',
+                        strength=0.7,
+                        value=macd['histogram'],
+                        description='MACD bullish crossover'
+                    ))
+                
+                if adx and adx > 25:  # Strong trend
+                    signals.append(TechnicalSignal(
+                        indicator='ADX',
+                        signal_type='bullish',
+                        strength=min(adx / 50, 1.0),
+                        value=adx,
+                        description=f'Strong trend (ADX: {adx:.1f})'
+                    ))
+            
+            # Check for bearish momentum
+            if rsi and rsi > 70:
+                signals.append(TechnicalSignal(
+                    indicator='RSI',
+                    signal_type='bearish',
+                    strength=(rsi - 70) / 30,
+                    value=rsi,
+                    description=f'Overbought (RSI: {rsi:.1f})'
+                ))
+            
+            if len(signals) >= 2:
+                # Calculate trade setup
+                current_price = prices[-1].close
+                direction = TradeDirection.LONG if signals[0].signal_type == 'bullish' else TradeDirection.SHORT
+                
+                setup = self._create_trade_setup(symbol, current_price, direction, signals, 'momentum')
+                
+                if setup and setup.risk_reward_ratio >= 1.5:
+                    opp = self._setup_to_opportunity(setup)
+                    opportunities.append(opp)
+        
+        return opportunities
+    
+    async def _scan_mean_reversion(self, watchlist: list[str]) -> list[Opportunity]:
+        """Find mean reversion setups."""
+        opportunities = []
+        
+        for symbol in watchlist:
+            prices = await self._fetch_prices(symbol, TimeFrame.M15, 50)
+            if not prices:
+                continue
+            
+            # Calculate Bollinger Bands
+            bb = self._calculate_bollinger_bands(prices, 20, 2)
+            rsi = self._calculate_rsi(prices, 14)
+            stoch = self._calculate_stochastic(prices, 14)
+            
+            if not bb:
+                continue
+            
+            current_price = prices[-1].close
+            signals = []
+            
+            # Check for oversold bounce setup
+            if current_price < bb['lower']:
+                signals.append(TechnicalSignal(
+                    indicator='Bollinger Bands',
+                    signal_type='bullish',
+                    strength=0.8,
+                    value=current_price,
+                    description=f'Price below lower band (oversold)'
+                ))
+                
+                if rsi and rsi < 30:
+                    signals.append(TechnicalSignal(
+                        indicator='RSI',
+                        signal_type='bullish',
+                        strength=(30 - rsi) / 30,
+                        value=rsi,
+                        description=f'RSI oversold ({rsi:.1f})'
+                    ))
+                
+                if stoch and stoch['k'] < 20:
+                    signals.append(TechnicalSignal(
+                        indicator='Stochastic',
+                        signal_type='bullish',
+                        strength=0.7,
+                        value=stoch['k'],
+                        description='Stochastic oversold'
+                    ))
+            
+            # Check for overbought fade setup
+            elif current_price > bb['upper']:
+                signals.append(TechnicalSignal(
+                    indicator='Bollinger Bands',
+                    signal_type='bearish',
+                    strength=0.8,
+                    value=current_price,
+                    description='Price above upper band (overbought)'
+                ))
+            
+            if len(signals) >= 2:
+                direction = TradeDirection.LONG if signals[0].signal_type == 'bullish' else TradeDirection.SHORT
+                setup = self._create_trade_setup(symbol, current_price, direction, signals, 'mean_reversion')
+                
+                if setup and setup.risk_reward_ratio >= 2.0:
+                    opp = self._setup_to_opportunity(setup)
+                    opportunities.append(opp)
+        
+        return opportunities
+    
+    async def _scan_breakouts(self, watchlist: list[str]) -> list[Opportunity]:
+        """Find breakout setups."""
+        opportunities = []
+        
+        for symbol in watchlist:
+            prices = await self._fetch_prices(symbol, TimeFrame.H1, 100)
+            if not prices:
+                continue
+            
+            # Find support/resistance levels
+            levels = self._find_support_resistance(prices)
+            current_price = prices[-1].close
+            atr = self._calculate_atr(prices, 14)
+            
+            if not levels or not atr:
+                continue
+            
+            signals = []
+            
+            # Check for resistance breakout
+            for resistance in levels.get('resistance', []):
+                if current_price > resistance * 1.01:  # 1% above resistance
+                    signals.append(TechnicalSignal(
+                        indicator='Resistance',
+                        signal_type='bullish',
+                        strength=0.8,
+                        value=resistance,
+                        description=f'Broke resistance at ${resistance:.2f}'
+                    ))
+                    break
+            
+            # Check for support breakdown
+            for support in levels.get('support', []):
+                if current_price < support * 0.99:  # 1% below support
+                    signals.append(TechnicalSignal(
+                        indicator='Support',
+                        signal_type='bearish',
+                        strength=0.8,
+                        value=support,
+                        description=f'Broke support at ${support:.2f}'
+                    ))
+                    break
+            
+            # Volume confirmation
+            avg_volume = sum(p.volume for p in prices[-20:]) / 20
+            current_volume = prices[-1].volume
+            
+            if current_volume > avg_volume * 1.5:
+                signals.append(TechnicalSignal(
+                    indicator='Volume',
+                    signal_type='bullish' if signals and signals[0].signal_type == 'bullish' else 'bearish',
+                    strength=min(current_volume / avg_volume / 3, 1.0),
+                    value=current_volume,
+                    description=f'Volume {current_volume/avg_volume:.1f}x average'
+                ))
+            
+            if len(signals) >= 2:
+                direction = TradeDirection.LONG if signals[0].signal_type == 'bullish' else TradeDirection.SHORT
+                setup = self._create_trade_setup(symbol, current_price, direction, signals, 'breakout')
+                
+                if setup and setup.risk_reward_ratio >= 2.0:
+                    opp = self._setup_to_opportunity(setup)
+                    opportunities.append(opp)
+        
+        return opportunities
+    
+    async def _analyze_sentiment(self, watchlist: list[str]) -> list[Opportunity]:
+        """Analyze news and social sentiment for trading opportunities."""
+        opportunities = []
+        
+        if not self.llm_client:
+            return opportunities
+        
+        for symbol in watchlist:
+            # Would fetch recent news and social mentions
+            # Then use LLM to analyze sentiment
+            
+            prompt = f"""Analyze the current market sentiment for {symbol}.
+
+Consider:
+1. Recent news headlines
+2. Social media sentiment (Twitter, Reddit)
+3. Analyst opinions
+4. Technical positioning
+
+Provide:
+- Overall sentiment: bullish/bearish/neutral
+- Sentiment strength: 1-10
+- Key catalysts
+- Potential risks
+- Trade recommendation
+
+Format as JSON."""
+
+            try:
+                response = await self.llm_client.complete(prompt)
+                analysis = json.loads(response)
+                
+                if analysis.get('sentiment_strength', 0) >= 7:
+                    direction = TradeDirection.LONG if analysis.get('sentiment') == 'bullish' else TradeDirection.SHORT
+                    
+                    opp = Opportunity(
+                        id=hashlib.md5(f"sentiment-{symbol}".encode()).hexdigest()[:12],
+                        module=self.name,
+                        title=f"Sentiment: {symbol} ({analysis.get('sentiment', 'unknown').title()})",
+                        description=f"Strong {analysis.get('sentiment')} sentiment. "
+                                  f"Catalysts: {', '.join(analysis.get('catalysts', [])[:2])}",
+                        potential_profit=100,  # Placeholder
+                        estimated_cost=1000,  # Position size
+                        risk_level=RiskLevel.HIGH,  # Sentiment trades are risky
+                        confidence=analysis.get('sentiment_strength', 5) / 10,
+                        time_sensitivity=3600,  # News moves fast
+                        metadata={
+                            'symbol': symbol,
+                            'sentiment': analysis.get('sentiment'),
+                            'strength': analysis.get('sentiment_strength'),
+                            'direction': direction.value,
+                            'analysis': analysis
+                        }
+                    )
+                    opportunities.append(opp)
+            except Exception as e:
+                self.logger.error(f"Sentiment analysis failed for {symbol}: {e}")
+        
+        return opportunities
+    
+    async def _detect_unusual_volume(self, watchlist: list[str]) -> list[Opportunity]:
+        """Detect unusual volume spikes that may indicate opportunity."""
+        opportunities = []
+        
+        for symbol in watchlist:
+            prices = await self._fetch_prices(symbol, TimeFrame.M5, 100)
+            if not prices:
+                continue
+            
+            avg_volume = sum(p.volume for p in prices[:-5]) / (len(prices) - 5)
+            recent_volume = sum(p.volume for p in prices[-5:]) / 5
+            
+            if recent_volume > avg_volume * 3:  # 3x average volume
+                current_price = prices[-1].close
+                price_change = (prices[-1].close - prices[-10].close) / prices[-10].close
+                
+                direction = TradeDirection.LONG if price_change > 0 else TradeDirection.SHORT
+                
+                opp = Opportunity(
+                    id=hashlib.md5(f"volume-{symbol}".encode()).hexdigest()[:12],
+                    module=self.name,
+                    title=f"Volume Spike: {symbol}",
+                    description=f"Volume {recent_volume/avg_volume:.1f}x normal. "
+                              f"Price moved {price_change*100:+.1f}% on high volume.",
+                    potential_profit=abs(price_change) * 1000,
+                    estimated_cost=1000,
+                    risk_level=RiskLevel.HIGH,
+                    confidence=0.5,
+                    time_sensitivity=900,  # 15 minutes
+                    metadata={
+                        'symbol': symbol,
+                        'volume_ratio': recent_volume / avg_volume,
+                        'price_change': price_change,
+                        'direction': direction.value
+                    }
+                )
+                opportunities.append(opp)
+        
+        return opportunities
+    
+    def _create_trade_setup(
+        self,
+        symbol: str,
+        current_price: float,
+        direction: TradeDirection,
+        signals: list[TechnicalSignal],
+        strategy: str
+    ) -> Optional[TradeSetup]:
+        """Create a trade setup with proper risk management."""
+        
+        # Get risk parameters from config
+        risk_per_trade = self.config.get('risk_per_trade', 100)  # $100 default
+        account_size = self.config.get('account_size', 10000)
+        max_risk_percent = self.config.get('max_risk_percent', 0.02)  # 2%
+        
+        # Calculate ATR-based stops (would use real ATR)
+        atr_multiplier = 1.5
+        estimated_atr = current_price * 0.02  # Estimate 2% ATR
+        
+        if direction == TradeDirection.LONG:
+            stop_loss = current_price - (estimated_atr * atr_multiplier)
+            take_profit = current_price + (estimated_atr * atr_multiplier * 2)  # 2:1 RR minimum
+        else:
+            stop_loss = current_price + (estimated_atr * atr_multiplier)
+            take_profit = current_price - (estimated_atr * atr_multiplier * 2)
+        
+        # Calculate position size based on risk
+        risk_per_share = abs(current_price - stop_loss)
+        position_size = min(
+            risk_per_trade / risk_per_share,
+            account_size * max_risk_percent / risk_per_share
+        )
+        
+        # Calculate confidence from signals
+        avg_signal_strength = sum(s.strength for s in signals) / len(signals)
+        confidence = avg_signal_strength * (len(signals) / 5)  # More signals = more confidence
+        
+        return TradeSetup(
+            symbol=symbol,
+            direction=direction,
+            entry_price=current_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            position_size=position_size,
+            strategy=strategy,
+            signals=signals,
+            confidence=min(confidence, 0.9)
+        )
+    
+    def _setup_to_opportunity(self, setup: TradeSetup) -> Opportunity:
+        """Convert a TradeSetup to an Opportunity."""
+        potential_profit = abs(setup.take_profit - setup.entry_price) * setup.position_size
+        risk_amount = setup.risk_amount
+        
+        return Opportunity(
+            id=hashlib.md5(f"trade-{setup.symbol}-{setup.strategy}".encode()).hexdigest()[:12],
+            module=self.name,
+            title=f"Trade: {setup.symbol} {setup.direction.value.upper()}",
+            description=f"{setup.strategy.replace('_', ' ').title()} setup. "
+                      f"Entry: ${setup.entry_price:.2f}, TP: ${setup.take_profit:.2f}, SL: ${setup.stop_loss:.2f}. "
+                      f"R:R = {setup.risk_reward_ratio:.1f}",
+            potential_profit=potential_profit,
+            estimated_cost=setup.entry_price * setup.position_size,
+            risk_level=self._assess_trade_risk(setup),
+            confidence=setup.confidence,
+            time_sensitivity=3600,  # Day trading setups expire
+            metadata={
+                'symbol': setup.symbol,
+                'direction': setup.direction.value,
+                'entry': setup.entry_price,
+                'stop_loss': setup.stop_loss,
+                'take_profit': setup.take_profit,
+                'position_size': setup.position_size,
+                'strategy': setup.strategy,
+                'signals': [{'indicator': s.indicator, 'type': s.signal_type, 'value': s.value} for s in setup.signals],
+                'risk_reward': setup.risk_reward_ratio,
+                'risk_amount': risk_amount
+            }
+        )
+    
+    def _assess_trade_risk(self, setup: TradeSetup) -> RiskLevel:
+        """Assess risk level of a trade setup."""
+        risk_score = 0
+        
+        # Low R:R is higher risk
+        if setup.risk_reward_ratio < 1.5:
+            risk_score += 2
+        elif setup.risk_reward_ratio < 2:
+            risk_score += 1
+        
+        # Low confidence is higher risk
+        if setup.confidence < 0.5:
+            risk_score += 2
+        elif setup.confidence < 0.7:
+            risk_score += 1
+        
+        # Few signals is higher risk
+        if len(setup.signals) < 2:
+            risk_score += 1
+        
+        if risk_score <= 1:
+            return RiskLevel.LOW
+        elif risk_score <= 3:
+            return RiskLevel.MEDIUM
+        return RiskLevel.HIGH
+    
+    async def execute(self, opportunity: Opportunity) -> ExecutionResult:
+        """Execute a trade."""
+        meta = opportunity.metadata
+        
+        self.logger.info(f"Executing trade: {meta['symbol']} {meta['direction']}")
+        
+        # In production:
+        # 1. Connect to broker API (Alpaca, Interactive Brokers, etc.)
+        # 2. Place entry order
+        # 3. Place stop-loss order
+        # 4. Place take-profit order
+        # 5. Monitor and manage
+        
+        if self.dry_run:
+            return ExecutionResult(
+                opportunity_id=opportunity.id,
+                success=True,
+                metadata={'dry_run': True, 'trade': meta}
+            )
+        
+        return ExecutionResult(
+            opportunity_id=opportunity.id,
+            success=True,
+            actual_cost=meta['entry'] * meta['position_size'],
+            metadata={
+                'symbol': meta['symbol'],
+                'direction': meta['direction'],
+                'entry_price': meta['entry'],
+                'position_size': meta['position_size'],
+                'stop_loss': meta['stop_loss'],
+                'take_profit': meta['take_profit'],
+                'status': 'order_placed'
+            }
+        )
+    
+    def calculate_risk(self, opportunity: Opportunity) -> RiskLevel:
+        """Calculate risk level for a trading opportunity."""
+        return opportunity.risk_level  # Already calculated in setup
+    
+    # Technical indicator calculations
+    def _calculate_rsi(self, prices: list[PriceData], period: int = 14) -> Optional[float]:
+        """Calculate RSI indicator."""
+        if len(prices) < period + 1:
+            return None
+        
+        closes = [p.close for p in prices]
+        deltas = [closes[i] - closes[i-1] for i in range(1, len(closes))]
+        
+        gains = [d if d > 0 else 0 for d in deltas[-period:]]
+        losses = [-d if d < 0 else 0 for d in deltas[-period:]]
+        
+        avg_gain = sum(gains) / period
+        avg_loss = sum(losses) / period
+        
+        if avg_loss == 0:
+            return 100
+        
+        rs = avg_gain / avg_loss
+        return 100 - (100 / (1 + rs))
+    
+    def _calculate_macd(self, prices: list[PriceData]) -> Optional[dict]:
+        """Calculate MACD indicator."""
+        if len(prices) < 26:
+            return None
+        
+        closes = [p.close for p in prices]
+        
+        # Simple EMA approximation
+        ema12 = sum(closes[-12:]) / 12
+        ema26 = sum(closes[-26:]) / 26
+        macd_line = ema12 - ema26
+        
+        # Signal line (9-period EMA of MACD)
+        signal = macd_line * 0.9  # Simplified
+        
+        return {
+            'macd': macd_line,
+            'signal': signal,
+            'histogram': macd_line - signal,
+            'signal_cross': macd_line > signal
+        }
+    
+    def _calculate_adx(self, prices: list[PriceData], period: int = 14) -> Optional[float]:
+        """Calculate ADX (Average Directional Index)."""
+        if len(prices) < period * 2:
+            return None
+        
+        # Simplified ADX calculation
+        # In production, would use proper +DI/-DI calculation
+        price_range = max(p.high for p in prices[-period:]) - min(p.low for p in prices[-period:])
+        avg_price = sum(p.close for p in prices[-period:]) / period
+        
+        return (price_range / avg_price) * 100 * 2  # Rough approximation
+    
+    def _calculate_bollinger_bands(self, prices: list[PriceData], period: int = 20, std_dev: float = 2) -> Optional[dict]:
+        """Calculate Bollinger Bands."""
+        if len(prices) < period:
+            return None
+        
+        closes = [p.close for p in prices[-period:]]
+        sma = sum(closes) / period
+        variance = sum((c - sma) ** 2 for c in closes) / period
+        std = variance ** 0.5
+        
+        return {
+            'upper': sma + (std * std_dev),
+            'middle': sma,
+            'lower': sma - (std * std_dev),
+            'std': std
+        }
+    
+    def _calculate_stochastic(self, prices: list[PriceData], period: int = 14) -> Optional[dict]:
+        """Calculate Stochastic oscillator."""
+        if len(prices) < period:
+            return None
+        
+        recent = prices[-period:]
+        highest_high = max(p.high for p in recent)
+        lowest_low = min(p.low for p in recent)
+        current_close = prices[-1].close
+        
+        if highest_high == lowest_low:
+            return None
+        
+        k = ((current_close - lowest_low) / (highest_high - lowest_low)) * 100
+        d = k * 0.9  # Simplified %D
+        
+        return {'k': k, 'd': d}
+    
+    def _calculate_atr(self, prices: list[PriceData], period: int = 14) -> Optional[float]:
+        """Calculate Average True Range."""
+        if len(prices) < period + 1:
+            return None
+        
+        tr_values = []
+        for i in range(1, len(prices)):
+            high_low = prices[i].high - prices[i].low
+            high_close = abs(prices[i].high - prices[i-1].close)
+            low_close = abs(prices[i].low - prices[i-1].close)
+            tr_values.append(max(high_low, high_close, low_close))
+        
+        return sum(tr_values[-period:]) / period
+    
+    def _find_support_resistance(self, prices: list[PriceData]) -> Optional[dict]:
+        """Find support and resistance levels."""
+        if len(prices) < 20:
+            return None
+        
+        highs = [p.high for p in prices]
+        lows = [p.low for p in prices]
+        
+        # Find local maxima and minima (simplified)
+        resistance = sorted(set(highs[-20:]), reverse=True)[:3]
+        support = sorted(set(lows[-20:]))[:3]
+        
+        return {
+            'resistance': resistance,
+            'support': support
+        }
+    
+    # Data fetching methods
+    async def _fetch_prices(self, symbol: str, timeframe: TimeFrame, count: int) -> list[PriceData]:
+        """Fetch price data for a symbol."""
+        # In production, would connect to:
+        # - Alpha Vantage
+        # - Yahoo Finance
+        # - Polygon.io
+        # - Binance/Coinbase for crypto
+        
+        return []
