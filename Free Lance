@@ -1,0 +1,351 @@
+"""
+Freelance Automation Module - Gig Economy Optimization
+
+Features:
+- Job matching based on skills/rates
+- Automated proposal generation
+- Client communication templates
+- Project delivery automation
+- Rate optimization
+"""
+
+import asyncio
+import hashlib
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Optional
+import json
+
+from .base import BaseModule, Opportunity, ExecutionResult, RiskLevel
+
+
+@dataclass
+class FreelanceJob:
+    """Represents a freelance job posting."""
+    platform: str
+    job_id: str
+    title: str
+    description: str
+    budget_low: float
+    budget_high: float
+    client_rating: float
+    client_spend: float
+    client_hires: int
+    skills_required: list[str]
+    proposals_count: int
+    posted_time: datetime
+    job_type: str  # fixed, hourly
+    
+    @property
+    def budget_avg(self) -> float:
+        return (self.budget_low + self.budget_high) / 2
+    
+    @property
+    def competition_level(self) -> str:
+        if self.proposals_count < 5:
+            return "low"
+        elif self.proposals_count < 15:
+            return "medium"
+        return "high"
+
+
+class FreelanceModule(BaseModule):
+    """Automates freelance job discovery and proposal generation."""
+    
+    PLATFORMS = {
+        'upwork': {
+            'name': 'Upwork',
+            'fee': 0.10,  # 10% for first $500
+        },
+        'fiverr': {
+            'name': 'Fiverr',
+            'fee': 0.20,
+        },
+        'toptal': {
+            'name': 'Toptal',
+            'fee': 0,
+        },
+        'freelancer': {
+            'name': 'Freelancer.com',
+            'fee': 0.10,
+        }
+    }
+    
+    SKILL_CATEGORIES = {
+        'writing': ['content writing', 'copywriting', 'blog writing', 'technical writing', 'ghostwriting'],
+        'design': ['logo design', 'web design', 'ui/ux', 'graphic design', 'branding'],
+        'development': ['python', 'javascript', 'react', 'nodejs', 'web development', 'mobile app'],
+        'marketing': ['seo', 'social media', 'email marketing', 'ppc', 'content marketing'],
+        'data': ['data entry', 'data analysis', 'excel', 'python', 'sql'],
+        'ai': ['chatgpt', 'prompt engineering', 'ai automation', 'machine learning']
+    }
+    
+    @property
+    def name(self) -> str:
+        return "freelance"
+    
+    @property
+    def description(self) -> str:
+        return "Freelance job matching and automated proposal generation"
+    
+    async def analyze(self) -> list[Opportunity]:
+        """Find freelance job opportunities."""
+        opportunities = []
+        
+        # Get user's skills from config
+        user_skills = self.config.get('skills', ['python', 'ai automation', 'content writing'])
+        min_rate = self.config.get('min_hourly_rate', 25)
+        
+        strategies = [
+            self._find_matching_jobs(user_skills, min_rate),
+            self._find_quick_wins(),
+            self._find_recurring_opportunities(),
+        ]
+        
+        results = await asyncio.gather(*strategies, return_exceptions=True)
+        
+        for result in results:
+            if isinstance(result, Exception):
+                self.logger.error(f"Strategy failed: {result}")
+                continue
+            opportunities.extend(result)
+        
+        return opportunities
+    
+    async def _find_matching_jobs(self, skills: list[str], min_rate: float) -> list[Opportunity]:
+        """Find jobs matching user's skills."""
+        opportunities = []
+        
+        for platform in self.PLATFORMS:
+            jobs = await self._fetch_jobs(platform, skills)
+            
+            for job in jobs:
+                # Calculate match score
+                match_score = self._calculate_skill_match(job.skills_required, skills)
+                
+                if match_score < 0.6:  # At least 60% skill match
+                    continue
+                
+                # Check if rate is acceptable
+                effective_rate = job.budget_avg / 10  # Rough hourly estimate for fixed jobs
+                if job.job_type == 'hourly' and job.budget_high < min_rate:
+                    continue
+                
+                # Assess opportunity quality
+                quality_score = self._assess_job_quality(job)
+                
+                if quality_score >= 70:
+                    opp = Opportunity(
+                        id=hashlib.md5(f"job-{platform}-{job.job_id}".encode()).hexdigest()[:12],
+                        module=self.name,
+                        title=f"Job: {job.title[:50]}",
+                        description=f"{platform.title()} - Budget: ${job.budget_low:,.0f}-${job.budget_high:,.0f}. "
+                                  f"Client rating: {job.client_rating:.1f}/5. "
+                                  f"Competition: {job.competition_level}",
+                        potential_profit=job.budget_avg * (1 - self.PLATFORMS[platform]['fee']),
+                        estimated_cost=0.5,  # Time cost in hours for proposal
+                        risk_level=self._assess_job_risk(job),
+                        confidence=match_score * (quality_score / 100),
+                        time_sensitivity=3600 * 24,  # Jobs get stale
+                        metadata={
+                            'platform': platform,
+                            'job_id': job.job_id,
+                            'title': job.title,
+                            'budget_range': [job.budget_low, job.budget_high],
+                            'skills_required': job.skills_required,
+                            'match_score': match_score,
+                            'quality_score': quality_score,
+                            'proposals_count': job.proposals_count,
+                            'client_rating': job.client_rating
+                        }
+                    )
+                    opportunities.append(opp)
+        
+        return opportunities
+    
+    async def _find_quick_wins(self) -> list[Opportunity]:
+        """Find small, quick jobs for fast earnings."""
+        opportunities = []
+        
+        # Focus on high-volume, low-competition tasks
+        quick_categories = ['data entry', 'transcription', 'simple edits', 'quick tasks']
+        
+        for platform in ['upwork', 'fiverr']:
+            for category in quick_categories:
+                jobs = await self._fetch_jobs(platform, [category])
+                
+                for job in jobs[:5]:  # Top 5 per category
+                    if job.budget_avg < 100 and job.proposals_count < 10:
+                        opp = Opportunity(
+                            id=hashlib.md5(f"quick-{platform}-{job.job_id}".encode()).hexdigest()[:12],
+                            module=self.name,
+                            title=f"Quick Win: {job.title[:40]}",
+                            description=f"Small task - ${job.budget_avg:.0f}. Low competition ({job.proposals_count} proposals)",
+                            potential_profit=job.budget_avg * 0.8,
+                            estimated_cost=0.25,  # Quick proposal
+                            risk_level=RiskLevel.LOW,
+                            confidence=0.7,
+                            time_sensitivity=3600 * 12,
+                            metadata={
+                                'platform': platform,
+                                'job_id': job.job_id,
+                                'category': category,
+                                'budget': job.budget_avg
+                            }
+                        )
+                        opportunities.append(opp)
+        
+        return opportunities
+    
+    async def _find_recurring_opportunities(self) -> list[Opportunity]:
+        """Find clients looking for ongoing work."""
+        opportunities = []
+        
+        # Look for keywords indicating recurring work
+        recurring_keywords = ['ongoing', 'long-term', 'monthly', 'regular', 'retainer']
+        
+        for platform in self.PLATFORMS:
+            for keyword in recurring_keywords:
+                jobs = await self._search_jobs(platform, keyword)
+                
+                for job in jobs:
+                    if job.client_hires > 5 and job.client_spend > 10000:
+                        # Good client with history
+                        opp = Opportunity(
+                            id=hashlib.md5(f"recurring-{platform}-{job.job_id}".encode()).hexdigest()[:12],
+                            module=self.name,
+                            title=f"Recurring: {job.title[:40]}",
+                            description=f"Client has spent ${job.client_spend:,.0f} total, {job.client_hires} hires. "
+                                      f"Potential for long-term relationship.",
+                            potential_profit=job.budget_avg * 6,  # 6 months potential
+                            estimated_cost=1,  # More effort for quality proposal
+                            risk_level=RiskLevel.LOW,
+                            confidence=0.6,
+                            metadata={
+                                'platform': platform,
+                                'job_id': job.job_id,
+                                'client_spend': job.client_spend,
+                                'client_hires': job.client_hires,
+                                'recurring_potential': True
+                            }
+                        )
+                        opportunities.append(opp)
+        
+        return opportunities
+    
+    def _calculate_skill_match(self, required: list[str], user_skills: list[str]) -> float:
+        """Calculate how well user skills match job requirements."""
+        if not required:
+            return 0.5  # Unknown requirements
+        
+        required_lower = [s.lower() for s in required]
+        user_lower = [s.lower() for s in user_skills]
+        
+        matches = sum(1 for skill in required_lower if any(us in skill or skill in us for us in user_lower))
+        return matches / len(required_lower)
+    
+    def _assess_job_quality(self, job: FreelanceJob) -> float:
+        """Score job quality (0-100)."""
+        score = 50  # Base score
+        
+        # Client rating
+        if job.client_rating >= 4.5:
+            score += 20
+        elif job.client_rating >= 4.0:
+            score += 10
+        elif job.client_rating < 3.5:
+            score -= 20
+        
+        # Client history
+        if job.client_spend > 10000:
+            score += 15
+        elif job.client_spend > 1000:
+            score += 5
+        elif job.client_spend < 100:
+            score -= 10
+        
+        # Competition
+        if job.competition_level == 'low':
+            score += 15
+        elif job.competition_level == 'high':
+            score -= 10
+        
+        return max(0, min(100, score))
+    
+    def _assess_job_risk(self, job: FreelanceJob) -> RiskLevel:
+        """Assess risk of taking a job."""
+        if job.client_rating < 3.5 or job.client_hires == 0:
+            return RiskLevel.HIGH
+        elif job.client_rating < 4.0 or job.client_spend < 500:
+            return RiskLevel.MEDIUM
+        return RiskLevel.LOW
+    
+    async def execute(self, opportunity: Opportunity) -> ExecutionResult:
+        """Generate and submit proposal."""
+        meta = opportunity.metadata
+        
+        self.logger.info(f"Generating proposal for: {meta.get('title', 'Unknown job')}")
+        
+        # Generate proposal using LLM
+        proposal = await self._generate_proposal(opportunity)
+        
+        if proposal:
+            return ExecutionResult(
+                opportunity_id=opportunity.id,
+                success=True,
+                actual_cost=opportunity.estimated_cost,
+                metadata={
+                    'platform': meta.get('platform'),
+                    'job_id': meta.get('job_id'),
+                    'proposal': proposal,
+                    'status': 'proposal_generated'
+                }
+            )
+        
+        return ExecutionResult(
+            opportunity_id=opportunity.id,
+            success=False,
+            error_message="Failed to generate proposal"
+        )
+    
+    async def _generate_proposal(self, opportunity: Opportunity) -> Optional[str]:
+        """Use LLM to generate a compelling proposal."""
+        if not self.llm_client:
+            return None
+        
+        meta = opportunity.metadata
+        
+        prompt = f"""Write a compelling freelance proposal for this job:
+
+Title: {meta.get('title', 'Unknown')}
+Budget: ${meta.get('budget_range', [0, 0])[0]} - ${meta.get('budget_range', [0, 0])[1]}
+Skills Required: {', '.join(meta.get('skills_required', []))}
+
+The proposal should:
+1. Start with a hook that shows you understand their problem
+2. Briefly highlight relevant experience
+3. Propose a clear approach/methodology
+4. Include a timeline
+5. End with a call to action
+
+Keep it under 200 words. Be professional but personable."""
+
+        try:
+            proposal = await self.llm_client.complete(prompt)
+            return proposal
+        except Exception as e:
+            self.logger.error(f"Proposal generation failed: {e}")
+            return None
+    
+    def calculate_risk(self, opportunity: Opportunity) -> RiskLevel:
+        """Calculate freelance job risk."""
+        return opportunity.risk_level
+    
+    # Data fetching methods
+    async def _fetch_jobs(self, platform: str, skills: list[str]) -> list[FreelanceJob]:
+        """Fetch job listings from platform."""
+        return []
+    
+    async def _search_jobs(self, platform: str, keyword: str) -> list[FreelanceJob]:
+        """Search for jobs by keyword."""
+        return []
