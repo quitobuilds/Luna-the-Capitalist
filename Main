@@ -1,0 +1,329 @@
+#!/usr/bin/env python3
+"""
+Luna Capitalist - Autonomous Money-Making Agent
+Main orchestrator that coordinates all modules.
+"""
+
+import asyncio
+import argparse
+import logging
+from datetime import datetime
+from pathlib import Path
+import yaml
+import sys
+
+from modules.base import BaseModule, Opportunity, ExecutionResult, RiskLevel
+from modules.trading_cards import TradingCardsModule
+from modules.dropshipping import DropshippingModule
+from modules.day_trading import DayTradingModule
+from modules.crypto_arbitrage import CryptoArbitrageModule
+from modules.domain_flipper import DomainFlipperModule
+from modules.nft_flipper import NFTFlipperModule
+from modules.freelance import FreelanceModule
+from modules.retail_arbitrage import RetailArbitrageModule
+from modules.content_monetize import ContentMonetizeModule
+from modules.rewards_farming import RewardsFarmingModule
+from utils.llm_client import LLMClient
+from utils.risk_manager import RiskManager
+from utils.notifier import Notifier
+
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('logs/luna.log')
+    ]
+)
+logger = logging.getLogger('LunaCapitalist')
+
+
+class LunaCapitalist:
+    """
+    Main orchestrator for the Luna Capitalist autonomous agent.
+    
+    Coordinates all money-making modules, manages risk, and handles
+    opportunity prioritization and execution.
+    """
+    
+    MODULES = {
+        'trading_cards': TradingCardsModule,
+        'dropshipping': DropshippingModule,
+        'day_trading': DayTradingModule,
+        'crypto_arbitrage': CryptoArbitrageModule,
+        'domain_flipper': DomainFlipperModule,
+        'nft_flipper': NFTFlipperModule,
+        'freelance': FreelanceModule,
+        'retail_arbitrage': RetailArbitrageModule,
+        'content_monetize': ContentMonetizeModule,
+        'rewards_farming': RewardsFarmingModule,
+    }
+    
+    def __init__(self, config_path: str = 'config/settings.yaml'):
+        """Initialize Luna with configuration."""
+        self.config = self._load_config(config_path)
+        self.llm_client = LLMClient(self.config.get('llm', {}))
+        self.risk_manager = RiskManager(self.config.get('risk', {}))
+        self.notifier = Notifier(self.config.get('notifications', {}))
+        self.modules: dict[str, BaseModule] = {}
+        self.running = False
+        
+        self._initialize_modules()
+    
+    def _load_config(self, path: str) -> dict:
+        """Load configuration from YAML file."""
+        config_file = Path(path)
+        
+        if not config_file.exists():
+            logger.warning(f"Config file not found: {path}, using defaults")
+            return self._default_config()
+        
+        with open(config_file) as f:
+            return yaml.safe_load(f)
+    
+    def _default_config(self) -> dict:
+        """Return default configuration."""
+        return {
+            'llm': {
+                'provider': 'anthropic',
+                'model': 'claude-sonnet-4-20250514',
+            },
+            'risk': {
+                'max_daily_loss': 100,
+                'max_position_size': 500,
+                'risk_level': 'moderate',
+            },
+            'modules': {
+                module_name: {'enabled': True}
+                for module_name in self.MODULES
+            }
+        }
+    
+    def _initialize_modules(self):
+        """Initialize all enabled modules."""
+        modules_config = self.config.get('modules', {})
+        
+        for name, module_class in self.MODULES.items():
+            module_config = modules_config.get(name, {})
+            
+            if module_config.get('enabled', True):
+                try:
+                    self.modules[name] = module_class(
+                        config=module_config,
+                        llm_client=self.llm_client
+                    )
+                    logger.info(f"Initialized module: {name}")
+                except Exception as e:
+                    logger.error(f"Failed to initialize {name}: {e}")
+    
+    async def analyze_all(self) -> list[Opportunity]:
+        """Run analysis across all modules."""
+        all_opportunities = []
+        
+        # Run all module analyses in parallel
+        tasks = []
+        for name, module in self.modules.items():
+            tasks.append(self._analyze_module(name, module))
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error(f"Module analysis failed: {result}")
+                continue
+            all_opportunities.extend(result)
+        
+        # Sort by risk-adjusted score
+        all_opportunities.sort(key=lambda x: x.risk_adjusted_score, reverse=True)
+        
+        return all_opportunities
+    
+    async def _analyze_module(self, name: str, module: BaseModule) -> list[Opportunity]:
+        """Analyze a single module with error handling."""
+        try:
+            logger.info(f"Analyzing: {name}")
+            opportunities = await module.analyze()
+            logger.info(f"{name} found {len(opportunities)} opportunities")
+            return opportunities
+        except Exception as e:
+            logger.error(f"Error in {name}: {e}")
+            return []
+    
+    async def execute_opportunity(self, opportunity: Opportunity) -> ExecutionResult:
+        """Execute a single opportunity."""
+        module = self.modules.get(opportunity.module)
+        
+        if not module:
+            return ExecutionResult(
+                opportunity_id=opportunity.id,
+                success=False,
+                error_message=f"Module not found: {opportunity.module}"
+            )
+        
+        # Check risk limits
+        if not self.risk_manager.can_execute(opportunity):
+            return ExecutionResult(
+                opportunity_id=opportunity.id,
+                success=False,
+                error_message="Risk limits exceeded"
+            )
+        
+        # Execute
+        try:
+            result = await module.execute(opportunity)
+            
+            # Update risk tracking
+            if result.success:
+                self.risk_manager.record_trade(
+                    cost=result.actual_cost or opportunity.estimated_cost,
+                    profit=result.actual_profit
+                )
+            
+            # Send notification
+            await self.notifier.notify_execution(opportunity, result)
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Execution failed: {e}")
+            return ExecutionResult(
+                opportunity_id=opportunity.id,
+                success=False,
+                error_message=str(e)
+            )
+    
+    async def run_cycle(self, execute: bool = True) -> dict:
+        """
+        Run one complete analysis and execution cycle.
+        
+        Args:
+            execute: Whether to execute opportunities or just analyze
+            
+        Returns:
+            Summary of cycle results
+        """
+        cycle_start = datetime.now()
+        logger.info("=" * 50)
+        logger.info(f"Starting cycle at {cycle_start}")
+        
+        # Analyze
+        opportunities = await self.analyze_all()
+        logger.info(f"Total opportunities found: {len(opportunities)}")
+        
+        # Filter by risk level
+        max_risk = RiskLevel[self.config.get('risk', {}).get('max_risk', 'HIGH').upper()]
+        filtered = [
+            opp for opp in opportunities
+            if opp.risk_level.value <= max_risk.value
+        ]
+        
+        results = []
+        
+        if execute:
+            # Execute top opportunities
+            max_executions = self.config.get('max_executions_per_cycle', 5)
+            
+            for opp in filtered[:max_executions]:
+                logger.info(f"Executing: {opp.title}")
+                result = await self.execute_opportunity(opp)
+                results.append(result)
+                
+                if not result.success:
+                    logger.warning(f"Failed: {result.error_message}")
+        
+        cycle_end = datetime.now()
+        duration = (cycle_end - cycle_start).total_seconds()
+        
+        summary = {
+            'cycle_start': cycle_start.isoformat(),
+            'cycle_end': cycle_end.isoformat(),
+            'duration_seconds': duration,
+            'opportunities_found': len(opportunities),
+            'opportunities_filtered': len(filtered),
+            'executions_attempted': len(results),
+            'executions_successful': sum(1 for r in results if r.success),
+            'top_opportunities': [
+                {
+                    'title': opp.title,
+                    'potential_profit': opp.potential_profit,
+                    'confidence': opp.confidence,
+                    'risk': opp.risk_level.name
+                }
+                for opp in filtered[:10]
+            ]
+        }
+        
+        logger.info(f"Cycle completed in {duration:.1f}s")
+        logger.info(f"Success rate: {summary['executions_successful']}/{summary['executions_attempted']}")
+        
+        return summary
+    
+    async def run_continuous(self, interval_minutes: int = 15):
+        """Run continuously with specified interval."""
+        self.running = True
+        logger.info(f"Starting continuous mode (interval: {interval_minutes}m)")
+        
+        while self.running:
+            try:
+                await self.run_cycle(execute=True)
+            except Exception as e:
+                logger.error(f"Cycle error: {e}")
+            
+            logger.info(f"Sleeping for {interval_minutes} minutes...")
+            await asyncio.sleep(interval_minutes * 60)
+    
+    def stop(self):
+        """Stop continuous running."""
+        self.running = False
+        logger.info("Stopping Luna...")
+
+
+def main():
+    """Main entry point."""
+    parser = argparse.ArgumentParser(description='Luna Capitalist - Autonomous Money-Making Agent')
+    parser.add_argument('--config', default='config/settings.yaml', help='Config file path')
+    parser.add_argument('--module', help='Run specific module only')
+    parser.add_argument('--dry-run', action='store_true', help='Analyze only, no execution')
+    parser.add_argument('--continuous', action='store_true', help='Run continuously')
+    parser.add_argument('--interval', type=int, default=15, help='Interval between cycles (minutes)')
+    parser.add_argument('--risk', choices=['conservative', 'moderate', 'aggressive'], 
+                       default='moderate', help='Risk level')
+    
+    args = parser.parse_args()
+    
+    # Create logs directory
+    Path('logs').mkdir(exist_ok=True)
+    
+    # Initialize Luna
+    luna = LunaCapitalist(args.config)
+    
+    # Override risk level if specified
+    if args.risk:
+        luna.config['risk']['risk_level'] = args.risk
+    
+    # Run
+    if args.continuous:
+        try:
+            asyncio.run(luna.run_continuous(args.interval))
+        except KeyboardInterrupt:
+            luna.stop()
+    else:
+        result = asyncio.run(luna.run_cycle(execute=not args.dry_run))
+        
+        # Print summary
+        print("\n" + "=" * 50)
+        print("CYCLE SUMMARY")
+        print("=" * 50)
+        print(f"Opportunities found: {result['opportunities_found']}")
+        print(f"After filtering: {result['opportunities_filtered']}")
+        print(f"Executions: {result['executions_successful']}/{result['executions_attempted']}")
+        print("\nTop Opportunities:")
+        for i, opp in enumerate(result['top_opportunities'][:5], 1):
+            print(f"  {i}. {opp['title']}")
+            print(f"     Profit: ${opp['potential_profit']:.2f} | Confidence: {opp['confidence']:.0%} | Risk: {opp['risk']}")
+
+
+if __name__ == '__main__':
+    main()
