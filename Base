@@ -1,0 +1,224 @@
+"""
+Base module interface for all Luna Capitalist modules.
+"""
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Optional, Any
+import logging
+
+
+class RiskLevel(Enum):
+    LOW = 1
+    MEDIUM = 2
+    HIGH = 3
+    EXTREME = 4
+
+
+class OpportunityStatus(Enum):
+    PENDING = "pending"
+    ANALYZING = "analyzing"
+    APPROVED = "approved"
+    EXECUTING = "executing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+@dataclass
+class Opportunity:
+    """Represents a money-making opportunity."""
+    id: str
+    module: str
+    title: str
+    description: str
+    potential_profit: float
+    estimated_cost: float
+    risk_level: RiskLevel
+    confidence: float  # 0-1
+    time_sensitivity: Optional[int] = None  # seconds until opportunity expires
+    metadata: dict = field(default_factory=dict)
+    status: OpportunityStatus = OpportunityStatus.PENDING
+    created_at: datetime = field(default_factory=datetime.now)
+    
+    @property
+    def expected_roi(self) -> float:
+        if self.estimated_cost == 0:
+            return float('inf')
+        return (self.potential_profit - self.estimated_cost) / self.estimated_cost
+    
+    @property
+    def risk_adjusted_score(self) -> float:
+        """Higher is better. Balances profit potential against risk."""
+        risk_penalty = {
+            RiskLevel.LOW: 1.0,
+            RiskLevel.MEDIUM: 0.7,
+            RiskLevel.HIGH: 0.4,
+            RiskLevel.EXTREME: 0.2
+        }
+        return self.expected_roi * self.confidence * risk_penalty[self.risk_level]
+
+
+@dataclass
+class ExecutionResult:
+    """Result of executing an opportunity."""
+    opportunity_id: str
+    success: bool
+    actual_profit: Optional[float] = None
+    actual_cost: Optional[float] = None
+    error_message: Optional[str] = None
+    execution_time: Optional[float] = None
+    metadata: dict = field(default_factory=dict)
+    timestamp: datetime = field(default_factory=datetime.now)
+    
+    @property
+    def actual_roi(self) -> Optional[float]:
+        if self.actual_cost is None or self.actual_cost == 0:
+            return None
+        if self.actual_profit is None:
+            return None
+        return (self.actual_profit - self.actual_cost) / self.actual_cost
+
+
+class BaseModule(ABC):
+    """
+    Abstract base class for all money-making modules.
+    
+    Each module must implement:
+    - analyze(): Find opportunities
+    - execute(): Act on opportunities
+    - calculate_risk(): Assess risk levels
+    """
+    
+    def __init__(self, config: dict, llm_client: Any = None):
+        self.config = config
+        self.llm_client = llm_client
+        self.logger = logging.getLogger(self.__class__.__name__)
+        self.enabled = config.get('enabled', True)
+        self.dry_run = config.get('dry_run', False)
+        
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """Module identifier."""
+        pass
+    
+    @property
+    @abstractmethod
+    def description(self) -> str:
+        """Human-readable description."""
+        pass
+    
+    @abstractmethod
+    async def analyze(self) -> list[Opportunity]:
+        """
+        Scan for opportunities.
+        
+        Returns:
+            List of Opportunity objects found.
+        """
+        pass
+    
+    @abstractmethod
+    async def execute(self, opportunity: Opportunity) -> ExecutionResult:
+        """
+        Execute on an opportunity.
+        
+        Args:
+            opportunity: The opportunity to act on.
+            
+        Returns:
+            ExecutionResult with outcome details.
+        """
+        pass
+    
+    @abstractmethod
+    def calculate_risk(self, opportunity: Opportunity) -> RiskLevel:
+        """
+        Assess the risk level of an opportunity.
+        
+        Args:
+            opportunity: The opportunity to assess.
+            
+        Returns:
+            RiskLevel enum value.
+        """
+        pass
+    
+    def validate_opportunity(self, opportunity: Opportunity) -> bool:
+        """
+        Check if an opportunity meets minimum criteria.
+        
+        Override in subclasses for module-specific validation.
+        """
+        min_profit = self.config.get('min_profit', 1.0)
+        min_confidence = self.config.get('min_confidence', 0.5)
+        max_risk = RiskLevel[self.config.get('max_risk', 'HIGH').upper()]
+        
+        if opportunity.potential_profit < min_profit:
+            self.logger.debug(f"Opportunity {opportunity.id} below min profit threshold")
+            return False
+            
+        if opportunity.confidence < min_confidence:
+            self.logger.debug(f"Opportunity {opportunity.id} below min confidence threshold")
+            return False
+            
+        if opportunity.risk_level.value > max_risk.value:
+            self.logger.debug(f"Opportunity {opportunity.id} exceeds max risk level")
+            return False
+            
+        return True
+    
+    async def run_cycle(self) -> list[ExecutionResult]:
+        """
+        Run one complete analyze -> validate -> execute cycle.
+        
+        Returns:
+            List of execution results.
+        """
+        if not self.enabled:
+            self.logger.info(f"Module {self.name} is disabled")
+            return []
+        
+        self.logger.info(f"Starting analysis cycle for {self.name}")
+        
+        # Find opportunities
+        opportunities = await self.analyze()
+        self.logger.info(f"Found {len(opportunities)} potential opportunities")
+        
+        # Filter and sort
+        valid_opportunities = [
+            opp for opp in opportunities 
+            if self.validate_opportunity(opp)
+        ]
+        valid_opportunities.sort(key=lambda x: x.risk_adjusted_score, reverse=True)
+        
+        self.logger.info(f"{len(valid_opportunities)} opportunities passed validation")
+        
+        # Execute
+        results = []
+        for opp in valid_opportunities:
+            if self.dry_run:
+                self.logger.info(f"[DRY RUN] Would execute: {opp.title}")
+                continue
+                
+            try:
+                result = await self.execute(opp)
+                results.append(result)
+                
+                if result.success:
+                    self.logger.info(f"Successfully executed: {opp.title}")
+                else:
+                    self.logger.warning(f"Failed to execute: {opp.title} - {result.error_message}")
+                    
+            except Exception as e:
+                self.logger.error(f"Exception executing {opp.title}: {str(e)}")
+                results.append(ExecutionResult(
+                    opportunity_id=opp.id,
+                    success=False,
+                    error_message=str(e)
+                ))
+        
+        return results
