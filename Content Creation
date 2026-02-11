@@ -1,0 +1,366 @@
+"""
+Content Monetization Module - SEO Content & Affiliate Marketing
+
+Features:
+- Keyword opportunity research
+- AI content generation
+- Affiliate program matching
+- Ad revenue optimization
+- Content performance tracking
+"""
+
+import asyncio
+import hashlib
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Optional
+import json
+
+from .base import BaseModule, Opportunity, ExecutionResult, RiskLevel
+
+
+@dataclass
+class KeywordOpportunity:
+    """Represents a keyword opportunity."""
+    keyword: str
+    search_volume: int
+    difficulty: float  # 0-100
+    cpc: float
+    trend: str  # rising, stable, declining
+    intent: str  # informational, commercial, transactional
+    
+    @property
+    def opportunity_score(self) -> float:
+        """Higher volume, lower difficulty = better."""
+        if self.difficulty == 0:
+            return 0
+        return (self.search_volume / 1000) / self.difficulty
+
+
+@dataclass
+class AffiliateProgram:
+    """Represents an affiliate program."""
+    name: str
+    network: str
+    commission_rate: float
+    cookie_days: int
+    avg_order_value: float
+    category: str
+    approval_difficulty: str  # easy, medium, hard
+
+
+class ContentMonetizeModule(BaseModule):
+    """Content creation and monetization automation."""
+    
+    AFFILIATE_NETWORKS = {
+        'amazon_associates': {
+            'name': 'Amazon Associates',
+            'commission': 0.04,  # 1-10% varies by category
+            'cookie_days': 1,
+        },
+        'shareasale': {
+            'name': 'ShareASale',
+            'commission': 0.10,  # Varies widely
+            'cookie_days': 30,
+        },
+        'cj': {
+            'name': 'CJ Affiliate',
+            'commission': 0.08,
+            'cookie_days': 30,
+        },
+        'impact': {
+            'name': 'Impact',
+            'commission': 0.10,
+            'cookie_days': 30,
+        }
+    }
+    
+    CONTENT_TYPES = [
+        'product_review',
+        'comparison_post',
+        'how_to_guide',
+        'best_of_list',
+        'buying_guide',
+        'deal_roundup',
+    ]
+    
+    PROFITABLE_NICHES = [
+        'personal finance',
+        'tech gadgets',
+        'software tools',
+        'health supplements',
+        'home improvement',
+        'pet products',
+        'outdoor gear',
+        'baby products',
+    ]
+    
+    @property
+    def name(self) -> str:
+        return "content_monetize"
+    
+    @property
+    def description(self) -> str:
+        return "SEO content creation and affiliate marketing automation"
+    
+    async def analyze(self) -> list[Opportunity]:
+        """Find content monetization opportunities."""
+        opportunities = []
+        
+        strategies = [
+            self._find_keyword_opportunities(),
+            self._find_affiliate_gaps(),
+            self._identify_trending_topics(),
+            self._analyze_competitor_content(),
+        ]
+        
+        results = await asyncio.gather(*strategies, return_exceptions=True)
+        
+        for result in results:
+            if isinstance(result, Exception):
+                self.logger.error(f"Strategy failed: {result}")
+                continue
+            opportunities.extend(result)
+        
+        return opportunities
+    
+    async def _find_keyword_opportunities(self) -> list[Opportunity]:
+        """Find low-competition, high-value keywords."""
+        opportunities = []
+        
+        for niche in self.PROFITABLE_NICHES:
+            keywords = await self._research_keywords(niche)
+            
+            for kw in keywords:
+                # Look for low difficulty, decent volume
+                if kw.difficulty < 30 and kw.search_volume > 500:
+                    estimated_traffic = kw.search_volume * 0.3  # 30% CTR for #1
+                    estimated_revenue = estimated_traffic * kw.cpc * 0.02  # 2% conversion
+                    
+                    opp = Opportunity(
+                        id=hashlib.md5(f"kw-{kw.keyword}".encode()).hexdigest()[:12],
+                        module=self.name,
+                        title=f"Keyword: {kw.keyword}",
+                        description=f"Volume: {kw.search_volume}/mo, Difficulty: {kw.difficulty:.0f}, "
+                                  f"CPC: ${kw.cpc:.2f}. Trend: {kw.trend}",
+                        potential_profit=estimated_revenue * 12,  # Annual estimate
+                        estimated_cost=2,  # Hours to write content
+                        risk_level=self._assess_keyword_risk(kw),
+                        confidence=0.6,
+                        metadata={
+                            'keyword': kw.keyword,
+                            'search_volume': kw.search_volume,
+                            'difficulty': kw.difficulty,
+                            'cpc': kw.cpc,
+                            'intent': kw.intent,
+                            'niche': niche,
+                            'estimated_monthly_revenue': estimated_revenue
+                        }
+                    )
+                    opportunities.append(opp)
+        
+        return opportunities
+    
+    async def _find_affiliate_gaps(self) -> list[Opportunity]:
+        """Find affiliate programs with content gaps."""
+        opportunities = []
+        
+        programs = await self._fetch_affiliate_programs()
+        
+        for program in programs:
+            # Check content saturation
+            content_gap = await self._analyze_content_gap(program)
+            
+            if content_gap.get('gap_score', 0) > 70:
+                monthly_potential = (
+                    program.avg_order_value * 
+                    program.commission_rate * 
+                    100  # Estimated monthly conversions
+                )
+                
+                opp = Opportunity(
+                    id=hashlib.md5(f"affiliate-{program.name}".encode()).hexdigest()[:12],
+                    module=self.name,
+                    title=f"Affiliate Gap: {program.name}",
+                    description=f"Underserved content for {program.name}. "
+                              f"Commission: {program.commission_rate*100:.0f}%, "
+                              f"AOV: ${program.avg_order_value:.0f}",
+                    potential_profit=monthly_potential * 12,
+                    estimated_cost=10,  # Content creation hours
+                    risk_level=RiskLevel.MEDIUM,
+                    confidence=0.5,
+                    metadata={
+                        'program': program.name,
+                        'network': program.network,
+                        'commission_rate': program.commission_rate,
+                        'content_gap': content_gap
+                    }
+                )
+                opportunities.append(opp)
+        
+        return opportunities
+    
+    async def _identify_trending_topics(self) -> list[Opportunity]:
+        """Find trending topics to create content about."""
+        opportunities = []
+        
+        if not self.llm_client:
+            return opportunities
+        
+        prompt = """Identify 5 trending topics that have affiliate/monetization potential.
+
+For each topic:
+- Topic/keyword
+- Why it's trending
+- Monetization angle (affiliate products, ads, etc.)
+- Content type that would work best
+- Competition level
+- Estimated monthly search potential
+
+Focus on evergreen topics with current relevance.
+Format as JSON array."""
+
+        try:
+            response = await self.llm_client.complete(prompt)
+            topics = json.loads(response)
+            
+            for topic in topics:
+                if topic.get('competition', 'high') != 'high':
+                    opp = Opportunity(
+                        id=hashlib.md5(f"trend-{topic.get('topic', '')}".encode()).hexdigest()[:12],
+                        module=self.name,
+                        title=f"Trending: {topic.get('topic', 'Unknown')[:40]}",
+                        description=f"{topic.get('why_trending', 'Trending topic')}. "
+                                  f"Monetization: {topic.get('monetization_angle', 'ads')}",
+                        potential_profit=200,  # Conservative monthly estimate
+                        estimated_cost=3,  # Hours
+                        risk_level=RiskLevel.LOW,
+                        confidence=0.6,
+                        time_sensitivity=86400 * 7,  # Week to capitalize on trend
+                        metadata=topic
+                    )
+                    opportunities.append(opp)
+        except Exception as e:
+            self.logger.error(f"Trending analysis failed: {e}")
+        
+        return opportunities
+    
+    async def _analyze_competitor_content(self) -> list[Opportunity]:
+        """Find gaps in competitor content."""
+        opportunities = []
+        
+        competitor_sites = self.config.get('competitors', [])
+        
+        for site in competitor_sites:
+            gaps = await self._find_content_gaps(site)
+            
+            for gap in gaps:
+                opp = Opportunity(
+                    id=hashlib.md5(f"gap-{site}-{gap.get('keyword', '')}".encode()).hexdigest()[:12],
+                    module=self.name,
+                    title=f"Content Gap: {gap.get('keyword', 'Unknown')[:40]}",
+                    description=f"Competitor {site} ranks but has weak content. "
+                              f"Opportunity to outrank.",
+                    potential_profit=gap.get('estimated_value', 100),
+                    estimated_cost=4,  # Hours
+                    risk_level=RiskLevel.MEDIUM,
+                    confidence=0.7,
+                    metadata=gap
+                )
+                opportunities.append(opp)
+        
+        return opportunities
+    
+    def _assess_keyword_risk(self, kw: KeywordOpportunity) -> RiskLevel:
+        """Assess risk of targeting a keyword."""
+        if kw.difficulty > 50:
+            return RiskLevel.HIGH
+        elif kw.difficulty > 30:
+            return RiskLevel.MEDIUM
+        return RiskLevel.LOW
+    
+    async def execute(self, opportunity: Opportunity) -> ExecutionResult:
+        """Create and publish content."""
+        meta = opportunity.metadata
+        
+        self.logger.info(f"Creating content for: {opportunity.title}")
+        
+        # Generate content using LLM
+        content = await self._generate_content(opportunity)
+        
+        if content:
+            return ExecutionResult(
+                opportunity_id=opportunity.id,
+                success=True,
+                actual_cost=opportunity.estimated_cost,
+                metadata={
+                    'keyword': meta.get('keyword'),
+                    'content_type': 'article',
+                    'word_count': len(content.split()),
+                    'status': 'content_generated',
+                    'next_steps': ['review', 'publish', 'build_links']
+                }
+            )
+        
+        return ExecutionResult(
+            opportunity_id=opportunity.id,
+            success=False,
+            error_message="Failed to generate content"
+        )
+    
+    async def _generate_content(self, opportunity: Opportunity) -> Optional[str]:
+        """Generate SEO-optimized content."""
+        if not self.llm_client:
+            return None
+        
+        meta = opportunity.metadata
+        keyword = meta.get('keyword', '')
+        intent = meta.get('intent', 'informational')
+        
+        prompt = f"""Write a comprehensive article targeting the keyword: "{keyword}"
+
+Search intent: {intent}
+
+Requirements:
+1. Engaging introduction with the keyword naturally included
+2. Clear headings and subheadings (H2, H3)
+3. Detailed, helpful content (aim for 1500+ words)
+4. Natural keyword placement throughout
+5. Include practical tips and examples
+6. Add a compelling conclusion with CTA
+
+If this is a product-related keyword, include:
+- Comparison points
+- Pros/cons
+- Who it's best for
+- Alternatives to consider
+
+Make it genuinely helpful and better than existing content on this topic."""
+
+        try:
+            content = await self.llm_client.complete(prompt)
+            return content
+        except Exception as e:
+            self.logger.error(f"Content generation failed: {e}")
+            return None
+    
+    def calculate_risk(self, opportunity: Opportunity) -> RiskLevel:
+        """Calculate content opportunity risk."""
+        return opportunity.risk_level
+    
+    # Data fetching methods
+    async def _research_keywords(self, niche: str) -> list[KeywordOpportunity]:
+        """Research keywords in a niche."""
+        return []
+    
+    async def _fetch_affiliate_programs(self) -> list[AffiliateProgram]:
+        """Fetch available affiliate programs."""
+        return []
+    
+    async def _analyze_content_gap(self, program: AffiliateProgram) -> dict:
+        """Analyze content gaps for affiliate program."""
+        return {}
+    
+    async def _find_content_gaps(self, competitor: str) -> list[dict]:
+        """Find content gaps from competitor analysis."""
+        return []
