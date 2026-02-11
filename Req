@@ -1,0 +1,45 @@
+# Luna Capitalist - Requirements
+
+# Core
+pyyaml>=6.0
+aiohttp>=3.8.0
+asyncio>=3.4.3
+
+# LLM Clients
+anthropic>=0.18.0
+openai>=1.0.0
+
+# Data & Analysis
+pandas>=2.0.0
+numpy>=1.24.0
+requests>=2.28.0
+
+# Web Scraping (for data collection)
+beautifulsoup4>=4.12.0
+selenium>=4.8.0
+playwright>=1.30.0
+
+# Trading (optional - uncomment as needed)
+# ccxt>=4.0.0  # Crypto exchanges
+# alpaca-trade-api>=3.0.0  # Stock trading
+# yfinance>=0.2.0  # Stock data
+
+# Database
+sqlite3  # Built-in
+# sqlalchemy>=2.0.0  # For more complex storage
+
+# Utilities
+python-dotenv>=1.0.0
+rich>=13.0.0  # Better console output
+tqdm>=4.65.0  # Progress bars
+
+# Optional integrations
+# discord.py>=2.0.0  # Discord notifications
+# python-telegram-bot>=20.0  # Telegram notifications
+# tweepy>=4.14.0  # Twitter posting
+
+# Development
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+black>=23.0.0
+mypy>=1.0.0
