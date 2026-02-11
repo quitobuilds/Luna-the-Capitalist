@@ -1,0 +1,522 @@
+"""
+Dropshipping Module - Automated E-commerce Operations
+
+Features:
+- Viral product discovery (TikTok, Instagram trends)
+- Supplier research and price comparison
+- AI-generated product listings
+- Competitor price monitoring
+- Automated order fulfillment
+"""
+
+import asyncio
+import hashlib
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Optional
+import json
+import re
+
+from .base import BaseModule, Opportunity, ExecutionResult, RiskLevel
+
+
+@dataclass
+class Product:
+    """Represents a potential dropshipping product."""
+    name: str
+    niche: str
+    supplier_price: float
+    suggested_retail: float
+    shipping_cost: float
+    shipping_time_days: int
+    supplier_url: str
+    supplier_name: str
+    trend_score: float  # 0-100
+    competition_level: str  # low, medium, high
+    image_urls: list[str]
+    
+    @property
+    def profit_margin(self) -> float:
+        return (self.suggested_retail - self.supplier_price - self.shipping_cost) / self.suggested_retail
+    
+    @property
+    def potential_daily_profit(self) -> float:
+        # Estimate based on trend score
+        estimated_daily_sales = self.trend_score / 10  # Rough estimate
+        profit_per_sale = self.suggested_retail - self.supplier_price - self.shipping_cost
+        return estimated_daily_sales * profit_per_sale
+
+
+@dataclass
+class Competitor:
+    """Represents a competitor selling similar products."""
+    store_name: str
+    platform: str
+    product_name: str
+    price: float
+    reviews: int
+    rating: float
+    estimated_sales: int
+    url: str
+
+
+class DropshippingModule(BaseModule):
+    """
+    Automated dropshipping product research and store management.
+    """
+    
+    SUPPLIER_PLATFORMS = {
+        'aliexpress': {
+            'name': 'AliExpress',
+            'shipping_avg': 15,  # days
+            'fee_percent': 0,
+        },
+        '1688': {
+            'name': '1688.com',
+            'shipping_avg': 20,
+            'fee_percent': 0,
+        },
+        'cjdropshipping': {
+            'name': 'CJ Dropshipping',
+            'shipping_avg': 10,
+            'fee_percent': 0,
+        },
+        'spocket': {
+            'name': 'Spocket',
+            'shipping_avg': 5,
+            'fee_percent': 0.02,
+        }
+    }
+    
+    SELLING_PLATFORMS = {
+        'shopify': {
+            'name': 'Shopify',
+            'monthly_fee': 29,
+            'transaction_fee': 0.029,
+        },
+        'amazon': {
+            'name': 'Amazon',
+            'monthly_fee': 39.99,
+            'referral_fee': 0.15,
+        },
+        'ebay': {
+            'name': 'eBay',
+            'monthly_fee': 0,
+            'final_value_fee': 0.1325,
+        },
+        'etsy': {
+            'name': 'Etsy',
+            'monthly_fee': 0,
+            'transaction_fee': 0.065,
+            'listing_fee': 0.20,
+        }
+    }
+    
+    TRENDING_NICHES = [
+        'pet accessories',
+        'home organization',
+        'phone accessories',
+        'fitness gadgets',
+        'beauty tools',
+        'kitchen gadgets',
+        'car accessories',
+        'baby products',
+        'gaming accessories',
+        'eco-friendly products'
+    ]
+    
+    @property
+    def name(self) -> str:
+        return "dropshipping"
+    
+    @property
+    def description(self) -> str:
+        return "Automated dropshipping product research and e-commerce management"
+    
+    async def analyze(self) -> list[Opportunity]:
+        """Find dropshipping opportunities."""
+        opportunities = []
+        
+        strategies = [
+            self._find_trending_products(),
+            self._find_underpriced_competitors(),
+            self._find_niche_gaps(),
+            self._analyze_seasonal_opportunities(),
+        ]
+        
+        results = await asyncio.gather(*strategies, return_exceptions=True)
+        
+        for result in results:
+            if isinstance(result, Exception):
+                self.logger.error(f"Strategy failed: {result}")
+                continue
+            opportunities.extend(result)
+        
+        return opportunities
+    
+    async def _find_trending_products(self) -> list[Opportunity]:
+        """Discover viral products from social media."""
+        opportunities = []
+        
+        # In production, would:
+        # 1. Scrape TikTok trending products
+        # 2. Monitor Instagram product tags
+        # 3. Track Amazon movers & shakers
+        # 4. Analyze Google Trends
+        
+        # Use LLM to identify trending products
+        if self.llm_client:
+            prompt = """Identify 5 currently viral or trending products that would be good for dropshipping.
+
+For each product, provide:
+- Product name and category
+- Why it's trending (TikTok viral, seasonal, problem-solving, etc.)
+- Estimated supplier cost (AliExpress typical price)
+- Suggested retail price
+- Target audience
+- Competition level (low/medium/high)
+- Trend longevity (fad/seasonal/evergreen)
+
+Focus on products that:
+- Solve a real problem
+- Have "wow" factor for social media
+- Can be sourced cheaply (<$15)
+- Have good profit margins (3x+ markup possible)
+
+Format as JSON array."""
+
+            try:
+                response = await self.llm_client.complete(prompt)
+                products = json.loads(response)
+                
+                for prod in products:
+                    supplier_cost = prod.get('supplier_cost', 10)
+                    retail_price = prod.get('retail_price', 30)
+                    profit = retail_price - supplier_cost - 5  # Assume $5 shipping/fees
+                    
+                    if profit > 10 and prod.get('competition', 'high') != 'high':
+                        opp = Opportunity(
+                            id=hashlib.md5(f"trend-{prod['name']}".encode()).hexdigest()[:12],
+                            module=self.name,
+                            title=f"Trending: {prod['name']}",
+                            description=f"{prod.get('why_trending', 'Viral product')}. "
+                                      f"Margin: ${profit:.2f}/sale, Competition: {prod.get('competition', 'unknown')}",
+                            potential_profit=profit * 30,  # Monthly estimate
+                            estimated_cost=supplier_cost * 10 + 100,  # Initial inventory + setup
+                            risk_level=self._assess_trend_risk(prod),
+                            confidence=0.6 if prod.get('longevity') == 'evergreen' else 0.4,
+                            time_sensitivity=86400 * 7 if prod.get('longevity') == 'fad' else None,
+                            metadata=prod
+                        )
+                        opportunities.append(opp)
+            except Exception as e:
+                self.logger.error(f"Trend analysis failed: {e}")
+        
+        return opportunities
+    
+    async def _find_underpriced_competitors(self) -> list[Opportunity]:
+        """Find competitors selling products at suboptimal prices."""
+        opportunities = []
+        
+        # Monitor competitor stores
+        competitors = self.config.get('competitor_stores', [])
+        
+        for competitor in competitors:
+            products = await self._scrape_competitor_store(competitor)
+            
+            for product in products:
+                # Find supplier price
+                supplier_price = await self._find_supplier_price(product)
+                
+                if supplier_price:
+                    optimal_price = supplier_price * 3  # 3x markup target
+                    
+                    if product.price > optimal_price * 1.3:  # Competitor overpriced by 30%+
+                        profit_per_sale = optimal_price - supplier_price - 5
+                        
+                        opp = Opportunity(
+                            id=hashlib.md5(f"undercut-{product.product_name}".encode()).hexdigest()[:12],
+                            module=self.name,
+                            title=f"Undercut: {product.product_name}",
+                            description=f"Competitor sells at ${product.price:.2f}, "
+                                      f"you can sell at ${optimal_price:.2f} and still profit ${profit_per_sale:.2f}/sale",
+                            potential_profit=profit_per_sale * product.estimated_sales,
+                            estimated_cost=supplier_price * 5 + 50,  # Starter inventory
+                            risk_level=RiskLevel.MEDIUM,
+                            confidence=0.7,
+                            metadata={
+                                'competitor': competitor,
+                                'product_name': product.product_name,
+                                'competitor_price': product.price,
+                                'suggested_price': optimal_price,
+                                'supplier_price': supplier_price,
+                                'estimated_market_sales': product.estimated_sales
+                            }
+                        )
+                        opportunities.append(opp)
+        
+        return opportunities
+    
+    async def _find_niche_gaps(self) -> list[Opportunity]:
+        """Find underserved niches with demand but low supply."""
+        opportunities = []
+        
+        for niche in self.TRENDING_NICHES:
+            # Analyze supply vs demand
+            demand_score = await self._calculate_demand(niche)
+            competition_score = await self._calculate_competition(niche)
+            
+            if demand_score > 70 and competition_score < 40:  # High demand, low competition
+                opp = Opportunity(
+                    id=hashlib.md5(f"niche-{niche}".encode()).hexdigest()[:12],
+                    module=self.name,
+                    title=f"Niche Gap: {niche.title()}",
+                    description=f"High demand (score: {demand_score}), low competition (score: {competition_score}). "
+                              f"Consider building a store focused on this niche.",
+                    potential_profit=500,  # Estimate based on niche
+                    estimated_cost=200,  # Store setup + initial products
+                    risk_level=RiskLevel.MEDIUM,
+                    confidence=0.5,
+                    metadata={
+                        'niche': niche,
+                        'demand_score': demand_score,
+                        'competition_score': competition_score,
+                        'recommended_products': []
+                    }
+                )
+                opportunities.append(opp)
+        
+        return opportunities
+    
+    async def _analyze_seasonal_opportunities(self) -> list[Opportunity]:
+        """Find products that will trend based on upcoming seasons/holidays."""
+        opportunities = []
+        
+        # Get upcoming events/seasons
+        current_month = datetime.now().month
+        
+        seasonal_products = {
+            1: ['fitness equipment', 'planners', 'organization products'],  # New Year
+            2: ["valentine's gifts", 'romantic items'],
+            3: ['spring cleaning', 'gardening'],
+            4: ['easter', 'outdoor'],
+            5: ["mother's day", 'spring fashion'],
+            6: ["father's day", 'summer gear', 'graduation'],
+            7: ['summer toys', 'beach accessories', 'travel'],
+            8: ['back to school', 'dorm essentials'],
+            9: ['fall decor', 'halloween prep'],
+            10: ['halloween costumes', 'fall fashion'],
+            11: ['black friday prep', 'christmas shopping'],
+            12: ['christmas gifts', 'winter gear']
+        }
+        
+        # Look 1-2 months ahead
+        upcoming_months = [(current_month + i - 1) % 12 + 1 for i in range(1, 3)]
+        
+        for month in upcoming_months:
+            for product_type in seasonal_products.get(month, []):
+                opp = Opportunity(
+                    id=hashlib.md5(f"seasonal-{month}-{product_type}".encode()).hexdigest()[:12],
+                    module=self.name,
+                    title=f"Seasonal: {product_type.title()}",
+                    description=f"Peak demand expected in month {month}. Start sourcing and listing now.",
+                    potential_profit=300,
+                    estimated_cost=150,
+                    risk_level=RiskLevel.LOW,
+                    confidence=0.7,
+                    time_sensitivity=86400 * 30,  # 30 days to prepare
+                    metadata={
+                        'product_type': product_type,
+                        'peak_month': month,
+                        'strategy': 'list_early_for_seo'
+                    }
+                )
+                opportunities.append(opp)
+        
+        return opportunities
+    
+    async def execute(self, opportunity: Opportunity) -> ExecutionResult:
+        """Execute a dropshipping opportunity."""
+        opp_type = opportunity.title.split(':')[0].strip().lower()
+        
+        if opp_type == 'trending':
+            return await self._execute_trending_product(opportunity)
+        elif opp_type == 'undercut':
+            return await self._execute_competitor_undercut(opportunity)
+        elif opp_type == 'niche gap':
+            return await self._execute_niche_store(opportunity)
+        elif opp_type == 'seasonal':
+            return await self._execute_seasonal_prep(opportunity)
+        else:
+            return ExecutionResult(
+                opportunity_id=opportunity.id,
+                success=False,
+                error_message=f"Unknown opportunity type: {opp_type}"
+            )
+    
+    async def _execute_trending_product(self, opportunity: Opportunity) -> ExecutionResult:
+        """Set up a trending product for sale."""
+        meta = opportunity.metadata
+        
+        self.logger.info(f"Setting up trending product: {meta.get('name')}")
+        
+        # In production:
+        # 1. Find best supplier on AliExpress/1688
+        # 2. Generate product listing (title, description, images)
+        # 3. Create Shopify/Amazon listing
+        # 4. Set up automated fulfillment
+        # 5. Create ad campaigns
+        
+        # Generate listing with LLM
+        if self.llm_client:
+            listing = await self._generate_product_listing(meta)
+        
+        return ExecutionResult(
+            opportunity_id=opportunity.id,
+            success=True,
+            actual_cost=opportunity.estimated_cost,
+            metadata={
+                'product': meta.get('name'),
+                'status': 'listing_created',
+                'next_steps': ['setup_ads', 'monitor_sales']
+            }
+        )
+    
+    async def _execute_competitor_undercut(self, opportunity: Opportunity) -> ExecutionResult:
+        """Create competing listing at better price."""
+        meta = opportunity.metadata
+        
+        return ExecutionResult(
+            opportunity_id=opportunity.id,
+            success=True,
+            actual_cost=opportunity.estimated_cost,
+            metadata={
+                'product': meta['product_name'],
+                'price': meta['suggested_price'],
+                'status': 'listing_created'
+            }
+        )
+    
+    async def _execute_niche_store(self, opportunity: Opportunity) -> ExecutionResult:
+        """Set up a niche-focused store."""
+        meta = opportunity.metadata
+        
+        return ExecutionResult(
+            opportunity_id=opportunity.id,
+            success=True,
+            actual_cost=opportunity.estimated_cost,
+            metadata={
+                'niche': meta['niche'],
+                'status': 'store_setup_initiated',
+                'platform': 'shopify'
+            }
+        )
+    
+    async def _execute_seasonal_prep(self, opportunity: Opportunity) -> ExecutionResult:
+        """Prepare seasonal product listings."""
+        meta = opportunity.metadata
+        
+        return ExecutionResult(
+            opportunity_id=opportunity.id,
+            success=True,
+            actual_cost=opportunity.estimated_cost,
+            metadata={
+                'product_type': meta['product_type'],
+                'peak_month': meta['peak_month'],
+                'status': 'listings_prepared'
+            }
+        )
+    
+    def calculate_risk(self, opportunity: Opportunity) -> RiskLevel:
+        """Assess risk of a dropshipping opportunity."""
+        meta = opportunity.metadata
+        
+        # Consider factors:
+        # - Competition level
+        # - Trend longevity
+        # - Initial investment
+        
+        competition = meta.get('competition', 'medium')
+        longevity = meta.get('longevity', 'seasonal')
+        
+        risk_score = 0
+        
+        if competition == 'high':
+            risk_score += 2
+        elif competition == 'medium':
+            risk_score += 1
+            
+        if longevity == 'fad':
+            risk_score += 2
+        elif longevity == 'seasonal':
+            risk_score += 1
+        
+        if opportunity.estimated_cost > 300:
+            risk_score += 1
+        
+        if risk_score <= 1:
+            return RiskLevel.LOW
+        elif risk_score <= 3:
+            return RiskLevel.MEDIUM
+        return RiskLevel.HIGH
+    
+    def _assess_trend_risk(self, product: dict) -> RiskLevel:
+        """Assess risk of a trending product."""
+        longevity = product.get('longevity', 'seasonal')
+        competition = product.get('competition', 'medium')
+        
+        if longevity == 'evergreen' and competition != 'high':
+            return RiskLevel.LOW
+        elif longevity == 'fad':
+            return RiskLevel.HIGH
+        return RiskLevel.MEDIUM
+    
+    # Helper methods (would connect to real APIs/scrapers)
+    async def _scrape_competitor_store(self, store_url: str) -> list[Competitor]:
+        """Scrape products from a competitor store."""
+        return []
+    
+    async def _find_supplier_price(self, product: Competitor) -> Optional[float]:
+        """Find the supplier price for a product."""
+        return None
+    
+    async def _calculate_demand(self, niche: str) -> float:
+        """Calculate demand score for a niche (0-100)."""
+        # Would use:
+        # - Google Trends
+        # - Amazon search volume
+        # - Social media mentions
+        return 50.0
+    
+    async def _calculate_competition(self, niche: str) -> float:
+        """Calculate competition score for a niche (0-100)."""
+        # Would analyze:
+        # - Number of sellers
+        # - Review counts
+        # - Ad competition
+        return 50.0
+    
+    async def _generate_product_listing(self, product: dict) -> dict:
+        """Use LLM to generate optimized product listing."""
+        if not self.llm_client:
+            return {}
+        
+        prompt = f"""Create a compelling product listing for: {product.get('name')}
+
+Target audience: {product.get('target_audience', 'general consumers')}
+Key benefits: {product.get('why_trending', 'solves a problem')}
+
+Generate:
+1. SEO-optimized title (60 chars max)
+2. Bullet points (5 key features)
+3. Product description (150 words, benefit-focused)
+4. Search keywords (10 relevant terms)
+
+Make it persuasive and highlight the value proposition.
+Format as JSON."""
+
+        try:
+            response = await self.llm_client.complete(prompt)
+            return json.loads(response)
+        except:
+            return {}
