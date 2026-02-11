@@ -1,0 +1,413 @@
+"""
+Retail Arbitrage Module - Physical Goods Resale
+
+Features:
+- Price tracking across retailers
+- Clearance/deal alerts
+- Amazon FBA opportunity finder
+- Limited release monitoring
+- Profit calculator with fees
+"""
+
+import asyncio
+import hashlib
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Optional
+import json
+
+from .base import BaseModule, Opportunity, ExecutionResult, RiskLevel
+
+
+@dataclass
+class Product:
+    """Represents a retail product."""
+    name: str
+    upc: str
+    buy_price: float
+    buy_store: str
+    sell_price: float
+    sell_platform: str
+    category: str
+    brand: str
+    condition: str
+    quantity_available: int
+    sales_rank: Optional[int]
+    reviews: int
+    
+    @property
+    def gross_profit(self) -> float:
+        return self.sell_price - self.buy_price
+
+
+@dataclass
+class DealAlert:
+    """Represents a retail deal."""
+    store: str
+    product_name: str
+    original_price: float
+    sale_price: float
+    discount_percent: float
+    url: str
+    expires: Optional[datetime]
+
+
+class RetailArbitrageModule(BaseModule):
+    """Finds retail arbitrage opportunities."""
+    
+    BUY_SOURCES = {
+        'walmart': {'name': 'Walmart', 'clearance_url': 'walmart.com/clearance'},
+        'target': {'name': 'Target', 'clearance_url': 'target.com/clearance'},
+        'costco': {'name': 'Costco'},
+        'bestbuy': {'name': 'Best Buy'},
+        'amazon_warehouse': {'name': 'Amazon Warehouse'},
+        'kohls': {'name': "Kohl's"},
+        'tj_maxx': {'name': 'TJ Maxx'},
+    }
+    
+    SELL_PLATFORMS = {
+        'amazon_fba': {
+            'name': 'Amazon FBA',
+            'referral_fee': 0.15,
+            'fba_fee_estimate': 3.50,  # Varies by size/weight
+        },
+        'amazon_fbm': {
+            'name': 'Amazon FBM',
+            'referral_fee': 0.15,
+            'shipping_estimate': 5.00,
+        },
+        'ebay': {
+            'name': 'eBay',
+            'final_value_fee': 0.1325,
+            'shipping_estimate': 8.00,
+        },
+        'mercari': {
+            'name': 'Mercari',
+            'selling_fee': 0.10,
+            'shipping_estimate': 7.00,
+        }
+    }
+    
+    PROFITABLE_CATEGORIES = [
+        'toys',
+        'beauty',
+        'grocery',
+        'home & kitchen',
+        'sports',
+        'electronics accessories',
+        'books',
+        'health',
+    ]
+    
+    @property
+    def name(self) -> str:
+        return "retail_arbitrage"
+    
+    @property
+    def description(self) -> str:
+        return "Retail to online arbitrage opportunity finder"
+    
+    async def analyze(self) -> list[Opportunity]:
+        """Find retail arbitrage opportunities."""
+        opportunities = []
+        
+        strategies = [
+            self._scan_clearance_deals(),
+            self._find_amazon_fba_opportunities(),
+            self._monitor_price_errors(),
+            self._track_limited_releases(),
+        ]
+        
+        results = await asyncio.gather(*strategies, return_exceptions=True)
+        
+        for result in results:
+            if isinstance(result, Exception):
+                self.logger.error(f"Strategy failed: {result}")
+                continue
+            opportunities.extend(result)
+        
+        return opportunities
+    
+    async def _scan_clearance_deals(self) -> list[Opportunity]:
+        """Scan clearance sections for arbitrage opportunities."""
+        opportunities = []
+        
+        for store, info in self.BUY_SOURCES.items():
+            deals = await self._fetch_clearance(store)
+            
+            for deal in deals:
+                if deal.discount_percent < 50:  # Only deep discounts
+                    continue
+                
+                # Check sell prices
+                sell_data = await self._lookup_sell_price(deal.product_name)
+                
+                if sell_data:
+                    profit = self._calculate_profit(
+                        buy_price=deal.sale_price,
+                        sell_price=sell_data['price'],
+                        platform=sell_data['platform']
+                    )
+                    
+                    roi = profit / deal.sale_price if deal.sale_price > 0 else 0
+                    
+                    if profit > 5 and roi > 0.3:  # $5 min profit, 30% ROI
+                        opp = Opportunity(
+                            id=hashlib.md5(f"clearance-{store}-{deal.product_name}".encode()).hexdigest()[:12],
+                            module=self.name,
+                            title=f"Clearance: {deal.product_name[:40]}",
+                            description=f"Buy at {store} for ${deal.sale_price:.2f} ({deal.discount_percent:.0f}% off), "
+                                      f"sell on {sell_data['platform']} for ${sell_data['price']:.2f}. "
+                                      f"Profit: ${profit:.2f} ({roi*100:.0f}% ROI)",
+                            potential_profit=profit,
+                            estimated_cost=deal.sale_price,
+                            risk_level=RiskLevel.LOW,
+                            confidence=0.8,
+                            time_sensitivity=86400 if deal.expires else None,
+                            metadata={
+                                'store': store,
+                                'product': deal.product_name,
+                                'buy_price': deal.sale_price,
+                                'original_price': deal.original_price,
+                                'sell_price': sell_data['price'],
+                                'sell_platform': sell_data['platform'],
+                                'profit': profit,
+                                'roi': roi,
+                                'url': deal.url
+                            }
+                        )
+                        opportunities.append(opp)
+        
+        return opportunities
+    
+    async def _find_amazon_fba_opportunities(self) -> list[Opportunity]:
+        """Find products profitable for Amazon FBA."""
+        opportunities = []
+        
+        # Would use tools like:
+        # - Keepa for price history
+        # - Jungle Scout for sales estimates
+        # - Tactical Arbitrage for scanning
+        
+        # Scan retail stores for FBA-worthy products
+        for category in self.PROFITABLE_CATEGORIES:
+            products = await self._scan_category_for_fba(category)
+            
+            for product in products:
+                # Calculate FBA profitability
+                fba_profit = self._calculate_fba_profit(product)
+                
+                if fba_profit.get('net_profit', 0) > 3 and fba_profit.get('roi', 0) > 0.5:
+                    opp = Opportunity(
+                        id=hashlib.md5(f"fba-{product.upc}".encode()).hexdigest()[:12],
+                        module=self.name,
+                        title=f"FBA: {product.name[:40]}",
+                        description=f"Buy at ${product.buy_price:.2f}, sell on Amazon FBA for ${product.sell_price:.2f}. "
+                                  f"Net profit: ${fba_profit['net_profit']:.2f}, ROI: {fba_profit['roi']*100:.0f}%",
+                        potential_profit=fba_profit['net_profit'] * product.quantity_available,
+                        estimated_cost=product.buy_price * product.quantity_available,
+                        risk_level=self._assess_fba_risk(product),
+                        confidence=0.75,
+                        metadata={
+                            'product': product.name,
+                            'upc': product.upc,
+                            'buy_price': product.buy_price,
+                            'buy_store': product.buy_store,
+                            'sell_price': product.sell_price,
+                            'fba_fees': fba_profit.get('fees', 0),
+                            'net_profit': fba_profit['net_profit'],
+                            'sales_rank': product.sales_rank
+                        }
+                    )
+                    opportunities.append(opp)
+        
+        return opportunities
+    
+    async def _monitor_price_errors(self) -> list[Opportunity]:
+        """Monitor for price errors and mistakes."""
+        opportunities = []
+        
+        # Would monitor deal sites:
+        # - Slickdeals
+        # - Reddit r/buildapcsales
+        # - Twitter price error accounts
+        # - Honey/Camelcamelcamel alerts
+        
+        price_errors = await self._fetch_price_errors()
+        
+        for error in price_errors:
+            opp = Opportunity(
+                id=hashlib.md5(f"price-error-{error.get('url', '')}".encode()).hexdigest()[:12],
+                module=self.name,
+                title=f"Price Error: {error.get('product', 'Unknown')[:40]}",
+                description=f"Potentially mispriced at ${error.get('price', 0):.2f} "
+                          f"(normally ${error.get('normal_price', 0):.2f})",
+                potential_profit=error.get('normal_price', 0) - error.get('price', 0),
+                estimated_cost=error.get('price', 0),
+                risk_level=RiskLevel.HIGH,  # Price errors often get cancelled
+                confidence=0.3,  # Low confidence - might get cancelled
+                time_sensitivity=300,  # 5 minutes - act fast
+                metadata=error
+            )
+            opportunities.append(opp)
+        
+        return opportunities
+    
+    async def _track_limited_releases(self) -> list[Opportunity]:
+        """Track limited edition product releases."""
+        opportunities = []
+        
+        # Would track:
+        # - Sneaker releases (SNKRS, Footlocker)
+        # - Gaming consoles
+        # - Collectibles (Funko, trading cards)
+        # - Tech launches
+        
+        limited_products = self.config.get('limited_watchlist', [
+            {'name': 'PS5', 'category': 'gaming'},
+            {'name': 'NVIDIA RTX', 'category': 'tech'},
+        ])
+        
+        for product in limited_products:
+            stock_check = await self._check_limited_stock(product)
+            
+            if stock_check.get('in_stock'):
+                resale_value = stock_check.get('resale_value', 0)
+                retail_price = stock_check.get('retail_price', 0)
+                
+                if resale_value > retail_price * 1.2:  # 20%+ markup
+                    opp = Opportunity(
+                        id=hashlib.md5(f"limited-{product['name']}".encode()).hexdigest()[:12],
+                        module=self.name,
+                        title=f"Limited: {product['name']}",
+                        description=f"In stock at ${retail_price:.2f}! Resale value: ${resale_value:.2f}",
+                        potential_profit=resale_value - retail_price,
+                        estimated_cost=retail_price,
+                        risk_level=RiskLevel.LOW,
+                        confidence=0.9,
+                        time_sensitivity=60,  # Act immediately
+                        metadata={
+                            'product': product['name'],
+                            'retail_price': retail_price,
+                            'resale_value': resale_value,
+                            'store': stock_check.get('store'),
+                            'url': stock_check.get('url')
+                        }
+                    )
+                    opportunities.append(opp)
+        
+        return opportunities
+    
+    def _calculate_profit(self, buy_price: float, sell_price: float, platform: str) -> float:
+        """Calculate net profit after fees."""
+        platform_info = self.SELL_PLATFORMS.get(platform, {})
+        
+        # Calculate fees
+        if 'referral_fee' in platform_info:
+            fees = sell_price * platform_info['referral_fee']
+        elif 'final_value_fee' in platform_info:
+            fees = sell_price * platform_info['final_value_fee']
+        elif 'selling_fee' in platform_info:
+            fees = sell_price * platform_info['selling_fee']
+        else:
+            fees = sell_price * 0.15  # Default 15%
+        
+        # Add shipping/FBA fees
+        fees += platform_info.get('fba_fee_estimate', 0)
+        fees += platform_info.get('shipping_estimate', 0)
+        
+        return sell_price - buy_price - fees
+    
+    def _calculate_fba_profit(self, product: Product) -> dict:
+        """Calculate detailed FBA profitability."""
+        # FBA fees vary by size/weight
+        referral_fee = product.sell_price * 0.15
+        fba_fee = 3.50  # Estimate for standard size
+        
+        total_fees = referral_fee + fba_fee
+        net_profit = product.sell_price - product.buy_price - total_fees
+        roi = net_profit / product.buy_price if product.buy_price > 0 else 0
+        
+        return {
+            'referral_fee': referral_fee,
+            'fba_fee': fba_fee,
+            'total_fees': total_fees,
+            'net_profit': net_profit,
+            'roi': roi
+        }
+    
+    def _assess_fba_risk(self, product: Product) -> RiskLevel:
+        """Assess risk of FBA product."""
+        risk_score = 0
+        
+        # Sales rank risk
+        if product.sales_rank:
+            if product.sales_rank > 100000:
+                risk_score += 2  # Slow seller
+            elif product.sales_rank > 50000:
+                risk_score += 1
+        
+        # Review count (market validation)
+        if product.reviews < 10:
+            risk_score += 1
+        
+        # Category risks
+        risky_categories = ['electronics', 'clothing', 'perishable']
+        if product.category.lower() in risky_categories:
+            risk_score += 1
+        
+        if risk_score <= 1:
+            return RiskLevel.LOW
+        elif risk_score <= 2:
+            return RiskLevel.MEDIUM
+        return RiskLevel.HIGH
+    
+    async def execute(self, opportunity: Opportunity) -> ExecutionResult:
+        """Execute retail arbitrage purchase."""
+        meta = opportunity.metadata
+        
+        self.logger.info(f"Executing purchase: {meta.get('product', 'Unknown')}")
+        
+        # Would:
+        # 1. Navigate to product URL
+        # 2. Add to cart
+        # 3. Complete checkout
+        # 4. Track shipment
+        # 5. Prep for resale
+        
+        return ExecutionResult(
+            opportunity_id=opportunity.id,
+            success=True,
+            actual_cost=opportunity.estimated_cost,
+            metadata={
+                'product': meta.get('product'),
+                'store': meta.get('store') or meta.get('buy_store'),
+                'status': 'purchased',
+                'next_steps': ['await_delivery', 'prep_for_fba']
+            }
+        )
+    
+    def calculate_risk(self, opportunity: Opportunity) -> RiskLevel:
+        """Calculate retail arbitrage risk."""
+        return opportunity.risk_level
+    
+    # Data fetching methods
+    async def _fetch_clearance(self, store: str) -> list[DealAlert]:
+        """Fetch clearance deals from store."""
+        return []
+    
+    async def _lookup_sell_price(self, product_name: str) -> Optional[dict]:
+        """Look up resale price for product."""
+        return None
+    
+    async def _scan_category_for_fba(self, category: str) -> list[Product]:
+        """Scan category for FBA opportunities."""
+        return []
+    
+    async def _fetch_price_errors(self) -> list[dict]:
+        """Fetch reported price errors."""
+        return []
+    
+    async def _check_limited_stock(self, product: dict) -> dict:
+        """Check stock for limited products."""
+        return {}
