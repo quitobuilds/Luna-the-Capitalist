@@ -1,0 +1,358 @@
+"""
+NFT Flipper Module - NFT Market Analysis & Trading
+
+Features:
+- Rarity analysis and undervalued NFT detection
+- Whale wallet tracking
+- New mint sniping
+- Floor price arbitrage
+- Trait-based pricing analysis
+"""
+
+import asyncio
+import hashlib
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Optional
+import json
+
+from .base import BaseModule, Opportunity, ExecutionResult, RiskLevel
+
+
+@dataclass
+class NFT:
+    """Represents an NFT listing."""
+    collection: str
+    token_id: str
+    name: str
+    price_eth: float
+    rarity_rank: int
+    total_supply: int
+    traits: dict
+    marketplace: str
+    seller: str
+    listing_time: datetime
+    
+    @property
+    def rarity_percentile(self) -> float:
+        return 1 - (self.rarity_rank / self.total_supply)
+
+
+@dataclass 
+class Collection:
+    """Represents an NFT collection."""
+    name: str
+    contract_address: str
+    floor_price: float
+    total_supply: int
+    num_owners: int
+    volume_24h: float
+    volume_7d: float
+    avg_price_24h: float
+
+
+class NFTFlipperModule(BaseModule):
+    """Finds NFT trading opportunities through market analysis."""
+    
+    MARKETPLACES = {
+        'opensea': {
+            'name': 'OpenSea',
+            'fee': 0.025,  # 2.5%
+        },
+        'blur': {
+            'name': 'Blur',
+            'fee': 0.005,  # 0.5%
+        },
+        'x2y2': {
+            'name': 'X2Y2',
+            'fee': 0.005,
+        },
+        'magiceden': {
+            'name': 'Magic Eden',
+            'fee': 0.02,
+        }
+    }
+    
+    WHALE_WALLETS = [
+        # Known whale/influencer wallets to track
+    ]
+    
+    @property
+    def name(self) -> str:
+        return "nft_flipper"
+    
+    @property
+    def description(self) -> str:
+        return "NFT market analysis, rarity sniping, and whale tracking"
+    
+    async def analyze(self) -> list[Opportunity]:
+        """Find NFT trading opportunities."""
+        opportunities = []
+        
+        strategies = [
+            self._find_undervalued_by_rarity(),
+            self._find_floor_arbitrage(),
+            self._track_whale_activity(),
+            self._find_new_mints(),
+        ]
+        
+        results = await asyncio.gather(*strategies, return_exceptions=True)
+        
+        for result in results:
+            if isinstance(result, Exception):
+                self.logger.error(f"Strategy failed: {result}")
+                continue
+            opportunities.extend(result)
+        
+        return opportunities
+    
+    async def _find_undervalued_by_rarity(self) -> list[Opportunity]:
+        """Find NFTs priced below their rarity suggests."""
+        opportunities = []
+        
+        collections = self.config.get('collections', [
+            'boredapeyachtclub',
+            'azuki',
+            'pudgypenguins',
+            'doodles-official'
+        ])
+        
+        for collection_slug in collections:
+            collection = await self._fetch_collection(collection_slug)
+            listings = await self._fetch_listings(collection_slug)
+            
+            if not collection or not listings:
+                continue
+            
+            for nft in listings:
+                # Calculate expected price based on rarity
+                rarity_multiplier = self._calculate_rarity_multiplier(nft)
+                expected_price = collection.floor_price * rarity_multiplier
+                
+                if nft.price_eth < expected_price * 0.7:  # 30% undervalued
+                    profit_potential = expected_price - nft.price_eth
+                    
+                    opp = Opportunity(
+                        id=hashlib.md5(f"rarity-{collection_slug}-{nft.token_id}".encode()).hexdigest()[:12],
+                        module=self.name,
+                        title=f"Rarity Snipe: {collection_slug} #{nft.token_id}",
+                        description=f"Rank {nft.rarity_rank}/{nft.total_supply} (top {nft.rarity_percentile*100:.1f}%). "
+                                  f"Listed at {nft.price_eth:.3f} ETH, fair value ~{expected_price:.3f} ETH",
+                        potential_profit=profit_potential,
+                        estimated_cost=nft.price_eth,
+                        risk_level=RiskLevel.MEDIUM,
+                        confidence=0.7,
+                        time_sensitivity=300,  # 5 min - good deals go fast
+                        metadata={
+                            'collection': collection_slug,
+                            'token_id': nft.token_id,
+                            'rarity_rank': nft.rarity_rank,
+                            'list_price': nft.price_eth,
+                            'expected_price': expected_price,
+                            'marketplace': nft.marketplace,
+                            'traits': nft.traits
+                        }
+                    )
+                    opportunities.append(opp)
+        
+        return opportunities
+    
+    async def _find_floor_arbitrage(self) -> list[Opportunity]:
+        """Find floor price discrepancies across marketplaces."""
+        opportunities = []
+        
+        collections = self.config.get('collections', [])
+        
+        for collection_slug in collections:
+            floors = await self._fetch_floor_prices(collection_slug)
+            
+            if len(floors) < 2:
+                continue
+            
+            # Find best buy and sell
+            best_buy = min(floors.items(), key=lambda x: x[1])
+            best_sell = max(floors.items(), key=lambda x: x[1])
+            
+            if best_buy[0] == best_sell[0]:
+                continue
+            
+            # Calculate profit after fees
+            buy_fee = self.MARKETPLACES.get(best_buy[0], {}).get('fee', 0.025)
+            sell_fee = self.MARKETPLACES.get(best_sell[0], {}).get('fee', 0.025)
+            
+            gross_profit = best_sell[1] - best_buy[1]
+            fees = best_buy[1] * buy_fee + best_sell[1] * sell_fee
+            net_profit = gross_profit - fees
+            
+            if net_profit > 0.01:  # 0.01 ETH minimum
+                opp = Opportunity(
+                    id=hashlib.md5(f"floor-arb-{collection_slug}".encode()).hexdigest()[:12],
+                    module=self.name,
+                    title=f"Floor Arb: {collection_slug}",
+                    description=f"Buy on {best_buy[0]} at {best_buy[1]:.3f} ETH, "
+                              f"sell on {best_sell[0]} at {best_sell[1]:.3f} ETH. "
+                              f"Net profit: {net_profit:.3f} ETH",
+                    potential_profit=net_profit,
+                    estimated_cost=best_buy[1],
+                    risk_level=RiskLevel.LOW,
+                    confidence=0.85,
+                    time_sensitivity=60,  # Very time sensitive
+                    metadata={
+                        'collection': collection_slug,
+                        'buy_marketplace': best_buy[0],
+                        'buy_price': best_buy[1],
+                        'sell_marketplace': best_sell[0],
+                        'sell_price': best_sell[1],
+                        'net_profit': net_profit
+                    }
+                )
+                opportunities.append(opp)
+        
+        return opportunities
+    
+    async def _track_whale_activity(self) -> list[Opportunity]:
+        """Track whale wallet activity for alpha."""
+        opportunities = []
+        
+        for wallet in self.WHALE_WALLETS:
+            recent_purchases = await self._fetch_wallet_activity(wallet, 'buy')
+            
+            for purchase in recent_purchases:
+                # If whale bought recently, might be worth following
+                if (datetime.now() - purchase.listing_time).total_seconds() < 3600:  # Within 1 hour
+                    collection = await self._fetch_collection(purchase.collection)
+                    
+                    if collection:
+                        opp = Opportunity(
+                            id=hashlib.md5(f"whale-{wallet[:8]}-{purchase.token_id}".encode()).hexdigest()[:12],
+                            module=self.name,
+                            title=f"Whale Alert: {purchase.collection}",
+                            description=f"Whale wallet bought {purchase.collection} #{purchase.token_id} "
+                                      f"at {purchase.price_eth:.3f} ETH. Floor: {collection.floor_price:.3f} ETH",
+                            potential_profit=collection.floor_price * 0.2,  # Estimate 20% upside
+                            estimated_cost=collection.floor_price,
+                            risk_level=RiskLevel.HIGH,  # Following whales is speculative
+                            confidence=0.5,
+                            time_sensitivity=1800,  # 30 min
+                            metadata={
+                                'whale_wallet': wallet,
+                                'collection': purchase.collection,
+                                'whale_price': purchase.price_eth,
+                                'current_floor': collection.floor_price
+                            }
+                        )
+                        opportunities.append(opp)
+        
+        return opportunities
+    
+    async def _find_new_mints(self) -> list[Opportunity]:
+        """Find promising new NFT mints."""
+        opportunities = []
+        
+        if not self.llm_client:
+            return opportunities
+        
+        # Would monitor:
+        # - Twitter for mint announcements
+        # - Discord alpha groups
+        # - NFT calendars
+        
+        prompt = """Identify 3 upcoming NFT mints that have high potential based on:
+- Team credentials
+- Artwork quality
+- Community engagement
+- Utility/roadmap
+- Whitelist exclusivity
+
+For each:
+- Project name
+- Mint date/price
+- Why it's promising
+- Risk factors
+- Flip potential (1-10)
+
+Format as JSON array."""
+
+        try:
+            response = await self.llm_client.complete(prompt)
+            mints = json.loads(response)
+            
+            for mint in mints:
+                if mint.get('flip_potential', 0) >= 7:
+                    opp = Opportunity(
+                        id=hashlib.md5(f"mint-{mint.get('name', 'unknown')}".encode()).hexdigest()[:12],
+                        module=self.name,
+                        title=f"Mint: {mint.get('name', 'Unknown')}",
+                        description=f"{mint.get('why_promising', 'High potential mint')}. "
+                                  f"Mint price: {mint.get('mint_price', 'TBA')}",
+                        potential_profit=0.5,  # Estimate
+                        estimated_cost=mint.get('mint_price', 0.1) if isinstance(mint.get('mint_price'), (int, float)) else 0.1,
+                        risk_level=RiskLevel.HIGH,
+                        confidence=mint.get('flip_potential', 5) / 10,
+                        time_sensitivity=86400 * 3,  # Usually need to prepare WL
+                        metadata=mint
+                    )
+                    opportunities.append(opp)
+        except Exception as e:
+            self.logger.error(f"Mint analysis failed: {e}")
+        
+        return opportunities
+    
+    def _calculate_rarity_multiplier(self, nft: NFT) -> float:
+        """Calculate price multiplier based on rarity."""
+        percentile = nft.rarity_percentile
+        
+        if percentile >= 0.99:  # Top 1%
+            return 5.0
+        elif percentile >= 0.95:  # Top 5%
+            return 3.0
+        elif percentile >= 0.90:  # Top 10%
+            return 2.0
+        elif percentile >= 0.75:  # Top 25%
+            return 1.5
+        elif percentile >= 0.50:  # Top 50%
+            return 1.2
+        return 1.0
+    
+    async def execute(self, opportunity: Opportunity) -> ExecutionResult:
+        """Execute NFT purchase."""
+        meta = opportunity.metadata
+        
+        self.logger.info(f"Executing NFT trade: {opportunity.title}")
+        
+        # Would:
+        # 1. Connect wallet
+        # 2. Execute purchase transaction
+        # 3. List for sale if flipping
+        
+        return ExecutionResult(
+            opportunity_id=opportunity.id,
+            success=True,
+            actual_cost=opportunity.estimated_cost,
+            metadata={
+                'status': 'purchased',
+                'collection': meta.get('collection'),
+                'token_id': meta.get('token_id')
+            }
+        )
+    
+    def calculate_risk(self, opportunity: Opportunity) -> RiskLevel:
+        """Calculate NFT investment risk."""
+        return opportunity.risk_level
+    
+    # Data fetching methods
+    async def _fetch_collection(self, slug: str) -> Optional[Collection]:
+        """Fetch collection data."""
+        return None
+    
+    async def _fetch_listings(self, slug: str) -> list[NFT]:
+        """Fetch current listings for a collection."""
+        return []
+    
+    async def _fetch_floor_prices(self, slug: str) -> dict[str, float]:
+        """Fetch floor prices across marketplaces."""
+        return {}
+    
+    async def _fetch_wallet_activity(self, wallet: str, action: str) -> list[NFT]:
+        """Fetch recent wallet activity."""
+        return []
