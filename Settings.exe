@@ -1,0 +1,122 @@
+# Luna Capitalist Configuration
+# Copy to settings.yaml and fill in your API keys
+
+# LLM Settings
+llm:
+  provider: anthropic  # anthropic, openai, or local
+  model: claude-sonnet-4-20250514
+  api_key: ${ANTHROPIC_API_KEY}  # Or set environment variable
+  max_tokens: 4096
+  temperature: 0.7
+
+# Risk Management
+risk:
+  max_daily_loss: 100  # Maximum loss per day in USD
+  max_position_size: 500  # Maximum single position size
+  max_risk: HIGH  # LOW, MEDIUM, HIGH, EXTREME
+  max_consecutive_losses: 5  # Pause after this many losses
+  cooldown_after_loss_limit: 60  # Minutes to wait after hitting loss limit
+
+# Notification Settings
+notifications:
+  enabled: true
+  channels:
+    - console
+    # - discord
+    # - telegram
+  discord_webhook: ""  # Your Discord webhook URL
+  telegram_token: ""  # Your Telegram bot token
+  telegram_chat_id: ""  # Your Telegram chat ID
+  min_profit_to_notify: 10  # Only notify for opportunities above this
+
+# Execution Settings
+max_executions_per_cycle: 5
+dry_run: false  # Set to true to analyze without executing
+
+# Module Configurations
+modules:
+  trading_cards:
+    enabled: true
+    platforms:
+      - tcgplayer
+      - ebay
+      - cardmarket
+    min_arbitrage_profit: 5
+    min_grading_ev: 20
+    watchlist:
+      - name: Charizard
+        set: Base Set
+        game: pokemon
+    grading_candidates:
+      - name: Charizard
+        set: Celebrations
+        psa10_mult: 3.0
+
+  dropshipping:
+    enabled: true
+    min_profit_margin: 0.3
+    competitor_stores: []
+
+  day_trading:
+    enabled: true
+    risk_per_trade: 100
+    account_size: 10000
+    max_risk_percent: 0.02
+    watchlist:
+      - SPY
+      - QQQ
+      - AAPL
+      - TSLA
+      - BTC
+      - ETH
+
+  crypto_arbitrage:
+    enabled: true
+    min_profit_percent: 0.2
+    exchanges:
+      - binance
+      - coinbase
+      - kraken
+
+  domain_flipper:
+    enabled: true
+    min_value_ratio: 3
+    budget_per_domain: 100
+
+  nft_flipper:
+    enabled: false  # High risk, disabled by default
+    collections:
+      - boredapeyachtclub
+      - azuki
+      - pudgypenguins
+
+  freelance:
+    enabled: true
+    skills:
+      - python
+      - ai automation
+      - content writing
+    min_hourly_rate: 25
+    platforms:
+      - upwork
+      - fiverr
+
+  retail_arbitrage:
+    enabled: true
+    min_profit: 5
+    min_roi: 0.3
+    limited_watchlist:
+      - name: PS5
+        category: gaming
+
+  content_monetize:
+    enabled: true
+    niches:
+      - personal finance
+      - tech gadgets
+    competitors: []
+
+  rewards_farming:
+    enabled: true
+    min_card_bonus: 200
+    min_bank_bonus: 100
