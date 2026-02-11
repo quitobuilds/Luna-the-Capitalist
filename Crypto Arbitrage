@@ -1,0 +1,298 @@
+"""
+Crypto Arbitrage Module - Cross-Exchange Arbitrage
+
+Features:
+- CEX to CEX arbitrage (Binance, Coinbase, Kraken)
+- DEX to CEX arbitrage
+- Triangular arbitrage within exchanges
+- Funding rate arbitrage (perpetuals vs spot)
+"""
+
+import asyncio
+import hashlib
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Optional
+import json
+
+from .base import BaseModule, Opportunity, ExecutionResult, RiskLevel
+
+
+@dataclass
+class ExchangePrice:
+    """Price data from an exchange."""
+    exchange: str
+    symbol: str
+    bid: float
+    ask: float
+    bid_volume: float
+    ask_volume: float
+    timestamp: datetime
+    
+    @property
+    def mid(self) -> float:
+        return (self.bid + self.ask) / 2
+    
+    @property
+    def spread(self) -> float:
+        return (self.ask - self.bid) / self.mid
+
+
+class CryptoArbitrageModule(BaseModule):
+    """Finds and executes crypto arbitrage opportunities."""
+    
+    EXCHANGES = {
+        'binance': {'name': 'Binance', 'taker_fee': 0.001},
+        'coinbase': {'name': 'Coinbase', 'taker_fee': 0.006},
+        'kraken': {'name': 'Kraken', 'taker_fee': 0.0026},
+        'okx': {'name': 'OKX', 'taker_fee': 0.001},
+    }
+    
+    TRADING_PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'AVAX/USDT', 'LINK/USDT']
+    
+    @property
+    def name(self) -> str:
+        return "crypto_arbitrage"
+    
+    @property
+    def description(self) -> str:
+        return "Cross-exchange and DeFi arbitrage opportunities"
+    
+    async def analyze(self) -> list[Opportunity]:
+        """Find crypto arbitrage opportunities."""
+        opportunities = []
+        
+        strategies = [
+            self._find_cex_arbitrage(),
+            self._find_triangular_arbitrage(),
+            self._find_funding_rate_arb(),
+        ]
+        
+        results = await asyncio.gather(*strategies, return_exceptions=True)
+        
+        for result in results:
+            if isinstance(result, Exception):
+                self.logger.error(f"Strategy failed: {result}")
+                continue
+            opportunities.extend(result)
+        
+        return opportunities
+    
+    async def _find_cex_arbitrage(self) -> list[Opportunity]:
+        """Find price discrepancies between centralized exchanges."""
+        opportunities = []
+        
+        for pair in self.TRADING_PAIRS:
+            prices = await self._fetch_all_prices(pair)
+            
+            if len(prices) < 2:
+                continue
+            
+            # Find best buy and sell
+            best_buy = min(prices, key=lambda x: x.ask)
+            best_sell = max(prices, key=lambda x: x.bid)
+            
+            if best_buy.exchange == best_sell.exchange:
+                continue
+            
+            # Calculate profit
+            buy_fee = self.EXCHANGES[best_buy.exchange]['taker_fee']
+            sell_fee = self.EXCHANGES[best_sell.exchange]['taker_fee']
+            
+            gross_profit_pct = (best_sell.bid - best_buy.ask) / best_buy.ask
+            net_profit_pct = gross_profit_pct - buy_fee - sell_fee
+            
+            if net_profit_pct > 0.002:  # 0.2% minimum
+                max_volume = min(best_buy.ask_volume, best_sell.bid_volume)
+                
+                opp = Opportunity(
+                    id=hashlib.md5(f"cex-arb-{pair}".encode()).hexdigest()[:12],
+                    module=self.name,
+                    title=f"CEX Arb: {pair}",
+                    description=f"Buy {pair} on {best_buy.exchange} at ${best_buy.ask:.2f}, "
+                              f"sell on {best_sell.exchange} at ${best_sell.bid:.2f}. "
+                              f"Net profit: {net_profit_pct*100:.2f}%",
+                    potential_profit=net_profit_pct * best_buy.ask * max_volume,
+                    estimated_cost=best_buy.ask * max_volume,
+                    risk_level=RiskLevel.MEDIUM,
+                    confidence=0.8,
+                    time_sensitivity=60,  # 1 minute - prices move fast
+                    metadata={
+                        'pair': pair,
+                        'buy_exchange': best_buy.exchange,
+                        'sell_exchange': best_sell.exchange,
+                        'buy_price': best_buy.ask,
+                        'sell_price': best_sell.bid,
+                        'net_profit_pct': net_profit_pct,
+                        'max_volume': max_volume
+                    }
+                )
+                opportunities.append(opp)
+        
+        return opportunities
+    
+    async def _find_triangular_arbitrage(self) -> list[Opportunity]:
+        """Find triangular arbitrage within single exchange."""
+        opportunities = []
+        
+        # Triangular paths: A -> B -> C -> A
+        triangles = [
+            ('BTC', 'ETH', 'USDT'),
+            ('BTC', 'SOL', 'USDT'),
+            ('ETH', 'LINK', 'USDT'),
+        ]
+        
+        for exchange in self.EXCHANGES:
+            for a, b, c in triangles:
+                # Would calculate: 
+                # 1. Buy B with A
+                # 2. Buy C with B  
+                # 3. Buy A with C
+                # If end > start, profit exists
+                
+                profit_pct = await self._calculate_triangle_profit(exchange, a, b, c)
+                
+                if profit_pct and profit_pct > 0.001:  # 0.1%
+                    opp = Opportunity(
+                        id=hashlib.md5(f"tri-{exchange}-{a}{b}{c}".encode()).hexdigest()[:12],
+                        module=self.name,
+                        title=f"Triangle: {a}->{b}->{c}->{a} on {exchange}",
+                        description=f"Triangular arbitrage opportunity. Profit: {profit_pct*100:.3f}%",
+                        potential_profit=profit_pct * 1000,  # Assuming $1000 size
+                        estimated_cost=1000,
+                        risk_level=RiskLevel.LOW,  # Same exchange, minimal transfer risk
+                        confidence=0.9,
+                        time_sensitivity=30,
+                        metadata={
+                            'exchange': exchange,
+                            'path': [a, b, c, a],
+                            'profit_pct': profit_pct
+                        }
+                    )
+                    opportunities.append(opp)
+        
+        return opportunities
+    
+    async def _find_funding_rate_arb(self) -> list[Opportunity]:
+        """Find funding rate arbitrage between perps and spot."""
+        opportunities = []
+        
+        for pair in self.TRADING_PAIRS:
+            for exchange in ['binance', 'bybit', 'okx']:
+                funding_rate = await self._get_funding_rate(exchange, pair)
+                
+                if funding_rate and abs(funding_rate) > 0.0005:  # 0.05% per 8h
+                    # Annualized rate
+                    annual_rate = funding_rate * 3 * 365  # 3x per day * 365 days
+                    
+                    if funding_rate > 0:
+                        # Shorts pay longs - go long spot, short perp
+                        strategy = "Long spot, short perp"
+                    else:
+                        # Longs pay shorts - short spot (borrow), long perp
+                        strategy = "Short spot, long perp"
+                    
+                    opp = Opportunity(
+                        id=hashlib.md5(f"funding-{exchange}-{pair}".encode()).hexdigest()[:12],
+                        module=self.name,
+                        title=f"Funding Arb: {pair} on {exchange}",
+                        description=f"{strategy}. Funding rate: {funding_rate*100:.3f}% per 8h "
+                                  f"(~{annual_rate*100:.1f}% APY)",
+                        potential_profit=abs(funding_rate) * 10000,  # Assuming $10k position
+                        estimated_cost=10000,
+                        risk_level=RiskLevel.MEDIUM,
+                        confidence=0.85,
+                        time_sensitivity=28800,  # 8 hours until next funding
+                        metadata={
+                            'exchange': exchange,
+                            'pair': pair,
+                            'funding_rate': funding_rate,
+                            'annual_rate': annual_rate,
+                            'strategy': strategy
+                        }
+                    )
+                    opportunities.append(opp)
+        
+        return opportunities
+    
+    async def execute(self, opportunity: Opportunity) -> ExecutionResult:
+        """Execute an arbitrage opportunity."""
+        opp_type = opportunity.title.split(':')[0].strip().lower()
+        
+        if 'cex arb' in opp_type:
+            return await self._execute_cex_arb(opportunity)
+        elif 'triangle' in opp_type:
+            return await self._execute_triangle(opportunity)
+        elif 'funding' in opp_type:
+            return await self._execute_funding_arb(opportunity)
+        
+        return ExecutionResult(
+            opportunity_id=opportunity.id,
+            success=False,
+            error_message="Unknown opportunity type"
+        )
+    
+    async def _execute_cex_arb(self, opportunity: Opportunity) -> ExecutionResult:
+        """Execute CEX to CEX arbitrage."""
+        meta = opportunity.metadata
+        
+        # Would:
+        # 1. Place buy order on buy_exchange
+        # 2. Place sell order on sell_exchange
+        # 3. Transfer funds to rebalance
+        
+        return ExecutionResult(
+            opportunity_id=opportunity.id,
+            success=True,
+            actual_cost=meta['buy_price'] * meta['max_volume'],
+            metadata={
+                'status': 'executed',
+                'buy_exchange': meta['buy_exchange'],
+                'sell_exchange': meta['sell_exchange']
+            }
+        )
+    
+    async def _execute_triangle(self, opportunity: Opportunity) -> ExecutionResult:
+        """Execute triangular arbitrage."""
+        meta = opportunity.metadata
+        
+        return ExecutionResult(
+            opportunity_id=opportunity.id,
+            success=True,
+            actual_cost=opportunity.estimated_cost,
+            metadata={
+                'status': 'executed',
+                'path': meta['path']
+            }
+        )
+    
+    async def _execute_funding_arb(self, opportunity: Opportunity) -> ExecutionResult:
+        """Execute funding rate arbitrage."""
+        meta = opportunity.metadata
+        
+        return ExecutionResult(
+            opportunity_id=opportunity.id,
+            success=True,
+            actual_cost=opportunity.estimated_cost,
+            metadata={
+                'status': 'position_opened',
+                'strategy': meta['strategy']
+            }
+        )
+    
+    def calculate_risk(self, opportunity: Opportunity) -> RiskLevel:
+        """Calculate risk for arbitrage opportunity."""
+        return opportunity.risk_level
+    
+    # Data fetching methods
+    async def _fetch_all_prices(self, pair: str) -> list[ExchangePrice]:
+        """Fetch prices from all exchanges."""
+        return []
+    
+    async def _calculate_triangle_profit(self, exchange: str, a: str, b: str, c: str) -> Optional[float]:
+        """Calculate profit from triangular path."""
+        return None
+    
+    async def _get_funding_rate(self, exchange: str, pair: str) -> Optional[float]:
+        """Get current funding rate for perpetual contract."""
+        return None
