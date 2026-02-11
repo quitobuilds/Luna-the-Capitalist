@@ -1,0 +1,562 @@
+"""
+Trading Cards Module - TCG Market Analysis & Arbitrage
+
+Analyzes markets for:
+- Pokemon TCG
+- Magic: The Gathering
+- Yu-Gi-Oh!
+- Sports Cards (Topps, Panini)
+
+Strategies:
+- Cross-platform arbitrage
+- Grading ROI predictions
+- Meta shift anticipation
+- Sealed product EV analysis
+"""
+
+import asyncio
+import hashlib
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Optional
+import json
+import re
+
+from .base import BaseModule, Opportunity, ExecutionResult, RiskLevel
+
+
+@dataclass
+class CardListing:
+    """Represents a card listing on a marketplace."""
+    platform: str
+    card_name: str
+    set_name: str
+    condition: str
+    price: float
+    shipping: float
+    seller_rating: Optional[float]
+    quantity: int
+    url: str
+    listing_id: str
+    
+    @property
+    def total_price(self) -> float:
+        return self.price + self.shipping
+
+
+@dataclass
+class GradingOpportunity:
+    """Represents a raw card worth grading."""
+    card_name: str
+    set_name: str
+    raw_price: float
+    grading_cost: float
+    psa_10_price: float
+    psa_9_price: float
+    psa_10_probability: float
+    psa_9_probability: float
+    
+    @property
+    def expected_value(self) -> float:
+        """Calculate expected value of grading."""
+        ev = (
+            self.psa_10_probability * self.psa_10_price +
+            self.psa_9_probability * self.psa_9_price +
+            (1 - self.psa_10_probability - self.psa_9_probability) * self.raw_price * 0.8
+        )
+        return ev - self.raw_price - self.grading_cost
+
+
+class TradingCardsModule(BaseModule):
+    """
+    Finds arbitrage and investment opportunities in trading card markets.
+    """
+    
+    PLATFORMS = {
+        'tcgplayer': {
+            'name': 'TCGPlayer',
+            'fee_percent': 0.1089,  # 10.89% seller fee
+            'base_url': 'https://www.tcgplayer.com'
+        },
+        'ebay': {
+            'name': 'eBay',
+            'fee_percent': 0.1325,  # ~13.25% total fees
+            'base_url': 'https://www.ebay.com'
+        },
+        'cardmarket': {
+            'name': 'Cardmarket',
+            'fee_percent': 0.05,  # 5% fee
+            'base_url': 'https://www.cardmarket.com'
+        },
+        'stockx': {
+            'name': 'StockX',
+            'fee_percent': 0.10,
+            'base_url': 'https://stockx.com'
+        }
+    }
+    
+    GRADING_COSTS = {
+        'psa': {
+            'economy': 50,  # 65+ business days
+            'regular': 100,  # 45 business days
+            'express': 200,  # 20 business days
+        },
+        'bgs': {
+            'economy': 35,
+            'standard': 80,
+            'express': 150,
+        },
+        'cgc': {
+            'economy': 25,
+            'standard': 50,
+            'express': 100,
+        }
+    }
+    
+    @property
+    def name(self) -> str:
+        return "trading_cards"
+    
+    @property
+    def description(self) -> str:
+        return "TCG market arbitrage and grading investment analysis"
+    
+    async def analyze(self) -> list[Opportunity]:
+        """Find trading card opportunities."""
+        opportunities = []
+        
+        # Run all analysis strategies
+        strategies = [
+            self._find_arbitrage_opportunities(),
+            self._find_grading_opportunities(),
+            self._find_sealed_product_deals(),
+            self._find_meta_shift_plays(),
+        ]
+        
+        results = await asyncio.gather(*strategies, return_exceptions=True)
+        
+        for result in results:
+            if isinstance(result, Exception):
+                self.logger.error(f"Strategy failed: {result}")
+                continue
+            opportunities.extend(result)
+        
+        return opportunities
+    
+    async def _find_arbitrage_opportunities(self) -> list[Opportunity]:
+        """Find cross-platform price discrepancies."""
+        opportunities = []
+        
+        # Get watchlist from config or use defaults
+        watchlist = self.config.get('watchlist', [
+            # Pokemon chase cards
+            {'name': 'Charizard', 'set': 'Base Set', 'game': 'pokemon'},
+            {'name': 'Pikachu Illustrator', 'set': 'Promo', 'game': 'pokemon'},
+            # MTG staples
+            {'name': 'Black Lotus', 'set': 'Alpha', 'game': 'mtg'},
+            {'name': 'Force of Will', 'set': 'Alliances', 'game': 'mtg'},
+            # Sports cards
+            {'name': 'Mickey Mantle', 'set': '1952 Topps', 'game': 'sports'},
+        ])
+        
+        for card in watchlist:
+            # Fetch prices from all platforms
+            prices = await self._fetch_card_prices(card)
+            
+            if len(prices) < 2:
+                continue
+            
+            # Find arbitrage opportunities
+            prices.sort(key=lambda x: x.total_price)
+            cheapest = prices[0]
+            
+            for listing in prices[1:]:
+                # Calculate profit after fees
+                sell_platform = self.PLATFORMS.get(listing.platform, {})
+                fee_rate = sell_platform.get('fee_percent', 0.15)
+                
+                gross_profit = listing.total_price - cheapest.total_price
+                fees = listing.total_price * fee_rate
+                net_profit = gross_profit - fees
+                
+                # Check if profitable
+                if net_profit > self.config.get('min_arbitrage_profit', 5):
+                    roi = net_profit / cheapest.total_price
+                    
+                    opp = Opportunity(
+                        id=hashlib.md5(f"{card['name']}-{cheapest.listing_id}-{listing.listing_id}".encode()).hexdigest()[:12],
+                        module=self.name,
+                        title=f"Arbitrage: {card['name']} ({card['set']})",
+                        description=f"Buy on {cheapest.platform} at ${cheapest.total_price:.2f}, "
+                                  f"sell on {listing.platform} at ${listing.total_price:.2f}",
+                        potential_profit=net_profit,
+                        estimated_cost=cheapest.total_price,
+                        risk_level=self._assess_arbitrage_risk(cheapest, listing),
+                        confidence=self._calculate_arbitrage_confidence(cheapest, listing),
+                        time_sensitivity=3600,  # 1 hour - prices can change
+                        metadata={
+                            'buy_platform': cheapest.platform,
+                            'buy_url': cheapest.url,
+                            'buy_price': cheapest.total_price,
+                            'sell_platform': listing.platform,
+                            'sell_price': listing.total_price,
+                            'card_name': card['name'],
+                            'set_name': card['set'],
+                            'condition': cheapest.condition,
+                            'roi': roi
+                        }
+                    )
+                    opportunities.append(opp)
+        
+        return opportunities
+    
+    async def _find_grading_opportunities(self) -> list[Opportunity]:
+        """Find raw cards worth submitting for grading."""
+        opportunities = []
+        
+        # Cards known to have high PSA 10 premiums
+        grading_candidates = self.config.get('grading_candidates', [
+            {'name': 'Charizard', 'set': 'Celebrations', 'psa10_mult': 3.0},
+            {'name': 'Umbreon VMAX', 'set': 'Evolving Skies', 'psa10_mult': 2.5},
+            {'name': 'Pikachu VMAX', 'set': 'Vivid Voltage', 'psa10_mult': 2.0},
+        ])
+        
+        for card in grading_candidates:
+            grading_opp = await self._analyze_grading_ev(card)
+            
+            if grading_opp and grading_opp.expected_value > self.config.get('min_grading_ev', 20):
+                opp = Opportunity(
+                    id=hashlib.md5(f"grade-{card['name']}-{card['set']}".encode()).hexdigest()[:12],
+                    module=self.name,
+                    title=f"Grade: {card['name']} ({card['set']})",
+                    description=f"Buy raw at ${grading_opp.raw_price:.2f}, grade with PSA. "
+                              f"EV: ${grading_opp.expected_value:.2f}",
+                    potential_profit=grading_opp.expected_value,
+                    estimated_cost=grading_opp.raw_price + grading_opp.grading_cost,
+                    risk_level=RiskLevel.MEDIUM,  # Grading is always uncertain
+                    confidence=0.7 * grading_opp.psa_10_probability,
+                    time_sensitivity=None,  # Not time-sensitive
+                    metadata={
+                        'card_name': card['name'],
+                        'set_name': card['set'],
+                        'raw_price': grading_opp.raw_price,
+                        'grading_cost': grading_opp.grading_cost,
+                        'psa_10_price': grading_opp.psa_10_price,
+                        'psa_10_prob': grading_opp.psa_10_probability,
+                    }
+                )
+                opportunities.append(opp)
+        
+        return opportunities
+    
+    async def _find_sealed_product_deals(self) -> list[Opportunity]:
+        """Find underpriced sealed product (booster boxes, ETBs, etc.)."""
+        opportunities = []
+        
+        # Analyze sealed product EV
+        sealed_products = self.config.get('sealed_watchlist', [
+            {'name': 'Pokemon 151 Booster Box', 'msrp': 144, 'game': 'pokemon'},
+            {'name': 'Evolving Skies Booster Box', 'msrp': 144, 'game': 'pokemon'},
+            {'name': 'Modern Horizons 3 Collector Box', 'msrp': 300, 'game': 'mtg'},
+        ])
+        
+        for product in sealed_products:
+            current_price = await self._get_sealed_price(product)
+            expected_value = await self._calculate_sealed_ev(product)
+            
+            if current_price and expected_value:
+                ev_ratio = expected_value / current_price
+                
+                if ev_ratio > 1.2:  # 20%+ positive EV
+                    profit = expected_value - current_price
+                    
+                    opp = Opportunity(
+                        id=hashlib.md5(f"sealed-{product['name']}".encode()).hexdigest()[:12],
+                        module=self.name,
+                        title=f"Sealed: {product['name']}",
+                        description=f"Current price: ${current_price:.2f}, EV: ${expected_value:.2f} ({ev_ratio:.1%} ratio)",
+                        potential_profit=profit,
+                        estimated_cost=current_price,
+                        risk_level=RiskLevel.MEDIUM,
+                        confidence=0.6,  # Sealed EV is variable
+                        metadata={
+                            'product_name': product['name'],
+                            'game': product['game'],
+                            'current_price': current_price,
+                            'expected_value': expected_value,
+                            'ev_ratio': ev_ratio
+                        }
+                    )
+                    opportunities.append(opp)
+        
+        return opportunities
+    
+    async def _find_meta_shift_plays(self) -> list[Opportunity]:
+        """Find cards likely to increase due to meta/format changes."""
+        opportunities = []
+        
+        if not self.llm_client:
+            return opportunities
+        
+        # Use LLM to analyze upcoming meta shifts
+        prompt = """Analyze the current trading card game meta for Pokemon TCG, Magic: The Gathering, and Yu-Gi-Oh.
+
+Identify cards that are likely to increase in value due to:
+1. Upcoming set releases that synergize with existing cards
+2. Recent tournament results showing emerging strategies
+3. Rotation schedules making cards more scarce
+4. Ban list changes creating new opportunities
+
+For each card, provide:
+- Card name and set
+- Current approximate price
+- Predicted price after meta shift
+- Confidence level (1-10)
+- Reasoning
+
+Format as JSON array."""
+
+        try:
+            response = await self.llm_client.complete(prompt)
+            predictions = json.loads(response)
+            
+            for pred in predictions:
+                if pred.get('confidence', 0) >= 7:
+                    current = pred.get('current_price', 0)
+                    predicted = pred.get('predicted_price', 0)
+                    profit = predicted - current
+                    
+                    if profit > 5 and profit / current > 0.3:  # 30%+ gain
+                        opp = Opportunity(
+                            id=hashlib.md5(f"meta-{pred['card_name']}".encode()).hexdigest()[:12],
+                            module=self.name,
+                            title=f"Meta Play: {pred['card_name']}",
+                            description=f"Expected to rise from ${current:.2f} to ${predicted:.2f}. {pred.get('reasoning', '')}",
+                            potential_profit=profit,
+                            estimated_cost=current,
+                            risk_level=RiskLevel.HIGH,  # Speculative
+                            confidence=pred['confidence'] / 10,
+                            time_sensitivity=86400 * 7,  # Usually a week window
+                            metadata=pred
+                        )
+                        opportunities.append(opp)
+        except Exception as e:
+            self.logger.error(f"Meta analysis failed: {e}")
+        
+        return opportunities
+    
+    async def execute(self, opportunity: Opportunity) -> ExecutionResult:
+        """Execute a trading card opportunity."""
+        opp_type = opportunity.title.split(':')[0].strip().lower()
+        
+        if opp_type == 'arbitrage':
+            return await self._execute_arbitrage(opportunity)
+        elif opp_type == 'grade':
+            return await self._execute_grading(opportunity)
+        elif opp_type == 'sealed':
+            return await self._execute_sealed_purchase(opportunity)
+        elif opp_type == 'meta play':
+            return await self._execute_meta_play(opportunity)
+        else:
+            return ExecutionResult(
+                opportunity_id=opportunity.id,
+                success=False,
+                error_message=f"Unknown opportunity type: {opp_type}"
+            )
+    
+    async def _execute_arbitrage(self, opportunity: Opportunity) -> ExecutionResult:
+        """Execute cross-platform arbitrage."""
+        meta = opportunity.metadata
+        
+        self.logger.info(f"Executing arbitrage: Buy {meta['card_name']} on {meta['buy_platform']}")
+        
+        # In production, this would:
+        # 1. Use platform APIs or browser automation to purchase
+        # 2. Track shipping and receipt
+        # 3. List on sell platform
+        # 4. Monitor until sold
+        
+        # For now, simulate execution
+        if self.dry_run:
+            return ExecutionResult(
+                opportunity_id=opportunity.id,
+                success=True,
+                actual_profit=None,
+                actual_cost=None,
+                metadata={'dry_run': True}
+            )
+        
+        # Placeholder for real execution
+        return ExecutionResult(
+            opportunity_id=opportunity.id,
+            success=True,
+            actual_cost=meta['buy_price'],
+            metadata={
+                'buy_platform': meta['buy_platform'],
+                'buy_url': meta['buy_url'],
+                'status': 'purchased',
+                'next_step': 'await_delivery_and_list'
+            }
+        )
+    
+    async def _execute_grading(self, opportunity: Opportunity) -> ExecutionResult:
+        """Purchase card and submit for grading."""
+        meta = opportunity.metadata
+        
+        self.logger.info(f"Executing grading play: {meta['card_name']}")
+        
+        # Would automate:
+        # 1. Purchase raw card
+        # 2. Submit to PSA/BGS
+        # 3. Track grading status
+        # 4. List graded card when returned
+        
+        return ExecutionResult(
+            opportunity_id=opportunity.id,
+            success=True,
+            actual_cost=meta['raw_price'] + meta['grading_cost'],
+            metadata={
+                'status': 'pending_purchase',
+                'grading_service': 'psa',
+                'estimated_return': '60-90 days'
+            }
+        )
+    
+    async def _execute_sealed_purchase(self, opportunity: Opportunity) -> ExecutionResult:
+        """Purchase sealed product."""
+        meta = opportunity.metadata
+        
+        return ExecutionResult(
+            opportunity_id=opportunity.id,
+            success=True,
+            actual_cost=meta['current_price'],
+            metadata={
+                'product': meta['product_name'],
+                'status': 'purchased',
+                'strategy': 'hold_or_open'
+            }
+        )
+    
+    async def _execute_meta_play(self, opportunity: Opportunity) -> ExecutionResult:
+        """Purchase card based on meta prediction."""
+        meta = opportunity.metadata
+        
+        return ExecutionResult(
+            opportunity_id=opportunity.id,
+            success=True,
+            actual_cost=meta.get('current_price', opportunity.estimated_cost),
+            metadata={
+                'card': meta.get('card_name'),
+                'status': 'purchased',
+                'target_sell_price': meta.get('predicted_price'),
+                'reasoning': meta.get('reasoning')
+            }
+        )
+    
+    def calculate_risk(self, opportunity: Opportunity) -> RiskLevel:
+        """Assess risk of a trading card opportunity."""
+        opp_type = opportunity.title.split(':')[0].strip().lower()
+        
+        if opp_type == 'arbitrage':
+            # Arbitrage is lower risk if spread is large
+            roi = opportunity.metadata.get('roi', 0)
+            if roi > 0.5:
+                return RiskLevel.LOW
+            elif roi > 0.2:
+                return RiskLevel.MEDIUM
+            return RiskLevel.HIGH
+            
+        elif opp_type == 'grade':
+            # Grading always has uncertainty
+            return RiskLevel.MEDIUM
+            
+        elif opp_type == 'sealed':
+            # Sealed depends on EV ratio
+            ev_ratio = opportunity.metadata.get('ev_ratio', 1)
+            if ev_ratio > 1.5:
+                return RiskLevel.LOW
+            elif ev_ratio > 1.2:
+                return RiskLevel.MEDIUM
+            return RiskLevel.HIGH
+            
+        elif opp_type == 'meta play':
+            # Speculative plays are always high risk
+            return RiskLevel.HIGH
+        
+        return RiskLevel.MEDIUM
+    
+    def _assess_arbitrage_risk(self, buy: CardListing, sell: CardListing) -> RiskLevel:
+        """Assess risk of an arbitrage opportunity."""
+        # Higher risk if:
+        # - Low seller ratings
+        # - Large price difference (might be fake)
+        # - Limited quantity
+        
+        risk_score = 0
+        
+        if buy.seller_rating and buy.seller_rating < 95:
+            risk_score += 1
+        if sell.seller_rating and sell.seller_rating < 95:
+            risk_score += 1
+        if buy.quantity < 2:
+            risk_score += 1
+        
+        price_diff_pct = (sell.total_price - buy.total_price) / buy.total_price
+        if price_diff_pct > 0.5:  # >50% difference is suspicious
+            risk_score += 2
+        
+        if risk_score <= 1:
+            return RiskLevel.LOW
+        elif risk_score <= 3:
+            return RiskLevel.MEDIUM
+        return RiskLevel.HIGH
+    
+    def _calculate_arbitrage_confidence(self, buy: CardListing, sell: CardListing) -> float:
+        """Calculate confidence in arbitrage opportunity."""
+        confidence = 0.8  # Base confidence
+        
+        # Adjust based on seller ratings
+        if buy.seller_rating:
+            confidence *= (buy.seller_rating / 100)
+        if sell.seller_rating:
+            confidence *= (sell.seller_rating / 100)
+        
+        # Adjust based on quantity
+        if buy.quantity > 5:
+            confidence *= 1.1
+        
+        return min(confidence, 0.95)
+    
+    # Data fetching methods (would connect to real APIs)
+    async def _fetch_card_prices(self, card: dict) -> list[CardListing]:
+        """Fetch prices from all platforms for a card."""
+        # In production, this would call real APIs:
+        # - TCGPlayer API
+        # - eBay Finding API
+        # - Cardmarket API
+        # - Web scraping as fallback
+        
+        # Placeholder returning simulated data
+        return []
+    
+    async def _analyze_grading_ev(self, card: dict) -> Optional[GradingOpportunity]:
+        """Analyze expected value of grading a card."""
+        # Would fetch:
+        # - Current raw prices
+        # - PSA 10/9 population and prices
+        # - Recent sales history
+        
+        return None
+    
+    async def _get_sealed_price(self, product: dict) -> Optional[float]:
+        """Get current market price for sealed product."""
+        return None
+    
+    async def _calculate_sealed_ev(self, product: dict) -> Optional[float]:
+        """Calculate expected value of opening sealed product."""
+        # Would analyze:
+        # - Pull rates
+        # - Chase card values
+        # - Bulk/common values
+        
+        return None
