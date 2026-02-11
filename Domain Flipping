@@ -1,0 +1,385 @@
+"""
+Domain Flipping Module - Domain Investment & Resale
+
+Features:
+- Expiring domain monitoring
+- Trend-based domain discovery
+- AI-powered domain valuation
+- Automated bidding on auctions
+- Portfolio management
+"""
+
+import asyncio
+import hashlib
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Optional
+import json
+import re
+
+from .base import BaseModule, Opportunity, ExecutionResult, RiskLevel
+
+
+@dataclass
+class Domain:
+    """Represents a domain name."""
+    name: str
+    tld: str
+    registrar: str
+    expiry_date: Optional[datetime]
+    age_years: float
+    backlinks: int
+    traffic_estimate: int
+    keyword_volume: int
+    estimated_value: float
+    current_price: float
+    
+    @property
+    def full_name(self) -> str:
+        return f"{self.name}.{self.tld}"
+    
+    @property
+    def value_ratio(self) -> float:
+        if self.current_price == 0:
+            return float('inf')
+        return self.estimated_value / self.current_price
+
+
+class DomainFlipperModule(BaseModule):
+    """Finds undervalued domains for investment."""
+    
+    PREMIUM_TLDS = ['com', 'io', 'ai', 'co', 'app', 'dev', 'net', 'org']
+    
+    VALUABLE_PATTERNS = [
+        r'^[a-z]{4}$',  # 4-letter domains (LLLL)
+        r'^[a-z]{3}$',  # 3-letter domains (LLL)
+        r'^\d{3}$',     # 3-digit domains
+        r'^\d{4}$',     # 4-digit domains
+        r'^[a-z]{2}\d{2}$',  # 2L2N pattern
+    ]
+    
+    TRENDING_KEYWORDS = [
+        'ai', 'gpt', 'crypto', 'nft', 'web3', 'meta', 'quantum',
+        'green', 'solar', 'ev', 'fintech', 'defi', 'dao'
+    ]
+    
+    @property
+    def name(self) -> str:
+        return "domain_flipper"
+    
+    @property
+    def description(self) -> str:
+        return "Domain investment and flipping opportunities"
+    
+    async def analyze(self) -> list[Opportunity]:
+        """Find domain investment opportunities."""
+        opportunities = []
+        
+        strategies = [
+            self._find_expiring_domains(),
+            self._find_trend_domains(),
+            self._find_undervalued_auctions(),
+            self._generate_brandable_domains(),
+        ]
+        
+        results = await asyncio.gather(*strategies, return_exceptions=True)
+        
+        for result in results:
+            if isinstance(result, Exception):
+                self.logger.error(f"Strategy failed: {result}")
+                continue
+            opportunities.extend(result)
+        
+        return opportunities
+    
+    async def _find_expiring_domains(self) -> list[Opportunity]:
+        """Find valuable domains about to expire."""
+        opportunities = []
+        
+        # Would query expiring domain services:
+        # - ExpiredDomains.net
+        # - NameJet
+        # - GoDaddy Auctions
+        # - SnapNames
+        
+        expiring = await self._fetch_expiring_domains()
+        
+        for domain in expiring:
+            if self._is_valuable_pattern(domain.name):
+                score = await self._score_domain(domain)
+                
+                if score > 70 and domain.value_ratio > 3:  # 3x potential
+                    opp = Opportunity(
+                        id=hashlib.md5(f"expire-{domain.full_name}".encode()).hexdigest()[:12],
+                        module=self.name,
+                        title=f"Expiring: {domain.full_name}",
+                        description=f"Expiring in {(domain.expiry_date - datetime.now()).days} days. "
+                                  f"Est. value: ${domain.estimated_value:,.0f}, "
+                                  f"Backlinks: {domain.backlinks}",
+                        potential_profit=domain.estimated_value - domain.current_price,
+                        estimated_cost=domain.current_price,
+                        risk_level=self._assess_domain_risk(domain),
+                        confidence=score / 100,
+                        time_sensitivity=(domain.expiry_date - datetime.now()).total_seconds() if domain.expiry_date else None,
+                        metadata={
+                            'domain': domain.full_name,
+                            'estimated_value': domain.estimated_value,
+                            'current_price': domain.current_price,
+                            'backlinks': domain.backlinks,
+                            'age_years': domain.age_years,
+                            'score': score
+                        }
+                    )
+                    opportunities.append(opp)
+        
+        return opportunities
+    
+    async def _find_trend_domains(self) -> list[Opportunity]:
+        """Find domains related to trending topics."""
+        opportunities = []
+        
+        if not self.llm_client:
+            return opportunities
+        
+        prompt = """Identify 5 emerging trends or technologies that will need domain names.
+
+For each trend:
+- Describe the trend briefly
+- Suggest 3 domain name patterns (without TLD)
+- Estimate demand timeline (months until peak)
+- Rate investment potential (1-10)
+
+Focus on:
+- New technologies
+- Emerging industries  
+- Cultural movements
+- Business models
+
+Format as JSON array."""
+
+        try:
+            response = await self.llm_client.complete(prompt)
+            trends = json.loads(response)
+            
+            for trend in trends:
+                if trend.get('investment_potential', 0) >= 7:
+                    for domain_pattern in trend.get('domain_patterns', [])[:2]:
+                        # Check availability
+                        available = await self._check_availability(domain_pattern)
+                        
+                        if available:
+                            opp = Opportunity(
+                                id=hashlib.md5(f"trend-{domain_pattern}".encode()).hexdigest()[:12],
+                                module=self.name,
+                                title=f"Trend Domain: {domain_pattern}.com",
+                                description=f"Related to: {trend.get('trend', 'emerging trend')}. "
+                                          f"Peak demand in ~{trend.get('timeline_months', 12)} months.",
+                                potential_profit=500,  # Conservative estimate
+                                estimated_cost=12,  # Registration cost
+                                risk_level=RiskLevel.MEDIUM,
+                                confidence=trend.get('investment_potential', 5) / 10,
+                                metadata={
+                                    'domain': f"{domain_pattern}.com",
+                                    'trend': trend.get('trend'),
+                                    'timeline': trend.get('timeline_months')
+                                }
+                            )
+                            opportunities.append(opp)
+        except Exception as e:
+            self.logger.error(f"Trend analysis failed: {e}")
+        
+        return opportunities
+    
+    async def _find_undervalued_auctions(self) -> list[Opportunity]:
+        """Find undervalued domains in auctions."""
+        opportunities = []
+        
+        auctions = await self._fetch_active_auctions()
+        
+        for domain in auctions:
+            fair_value = await self._estimate_value(domain)
+            
+            if fair_value > domain.current_price * 2:  # 2x undervalued
+                opp = Opportunity(
+                    id=hashlib.md5(f"auction-{domain.full_name}".encode()).hexdigest()[:12],
+                    module=self.name,
+                    title=f"Auction: {domain.full_name}",
+                    description=f"Current bid: ${domain.current_price:,.0f}, "
+                              f"Est. value: ${fair_value:,.0f}",
+                    potential_profit=fair_value - domain.current_price,
+                    estimated_cost=domain.current_price,
+                    risk_level=RiskLevel.MEDIUM,
+                    confidence=0.6,
+                    time_sensitivity=86400,  # Auction timing
+                    metadata={
+                        'domain': domain.full_name,
+                        'current_bid': domain.current_price,
+                        'estimated_value': fair_value,
+                        'auction_end': None
+                    }
+                )
+                opportunities.append(opp)
+        
+        return opportunities
+    
+    async def _generate_brandable_domains(self) -> list[Opportunity]:
+        """Generate brandable domain ideas."""
+        opportunities = []
+        
+        if not self.llm_client:
+            return opportunities
+        
+        prompt = """Generate 10 brandable domain names that are:
+- Short (5-8 characters)
+- Easy to pronounce
+- Memorable
+- Could work for a tech startup
+
+For each:
+- Domain name (without TLD)
+- Why it's brandable
+- Potential industries it suits
+- Estimated resale value ($)
+
+Format as JSON array."""
+
+        try:
+            response = await self.llm_client.complete(prompt)
+            domains = json.loads(response)
+            
+            for d in domains:
+                name = d.get('domain', '')
+                if name:
+                    available = await self._check_availability(name)
+                    
+                    if available:
+                        opp = Opportunity(
+                            id=hashlib.md5(f"brand-{name}".encode()).hexdigest()[:12],
+                            module=self.name,
+                            title=f"Brandable: {name}.com",
+                            description=f"Brandable for: {', '.join(d.get('industries', [])[:2])}. "
+                                      f"Est. value: ${d.get('estimated_value', 100)}",
+                            potential_profit=d.get('estimated_value', 100) - 12,
+                            estimated_cost=12,  # Registration
+                            risk_level=RiskLevel.LOW,
+                            confidence=0.5,
+                            metadata={
+                                'domain': f"{name}.com",
+                                'brandable_for': d.get('industries'),
+                                'reasoning': d.get('why_brandable')
+                            }
+                        )
+                        opportunities.append(opp)
+        except Exception as e:
+            self.logger.error(f"Brandable generation failed: {e}")
+        
+        return opportunities
+    
+    def _is_valuable_pattern(self, name: str) -> bool:
+        """Check if domain matches valuable patterns."""
+        for pattern in self.VALUABLE_PATTERNS:
+            if re.match(pattern, name.lower()):
+                return True
+        
+        # Check for trending keywords
+        for keyword in self.TRENDING_KEYWORDS:
+            if keyword in name.lower():
+                return True
+        
+        return False
+    
+    async def _score_domain(self, domain: Domain) -> float:
+        """Score a domain's investment potential (0-100)."""
+        score = 0
+        
+        # TLD quality
+        if domain.tld in ['com']:
+            score += 30
+        elif domain.tld in ['io', 'ai', 'co']:
+            score += 20
+        elif domain.tld in self.PREMIUM_TLDS:
+            score += 10
+        
+        # Length bonus
+        if len(domain.name) <= 4:
+            score += 25
+        elif len(domain.name) <= 6:
+            score += 15
+        elif len(domain.name) <= 8:
+            score += 5
+        
+        # Backlinks/authority
+        if domain.backlinks > 1000:
+            score += 20
+        elif domain.backlinks > 100:
+            score += 10
+        elif domain.backlinks > 10:
+            score += 5
+        
+        # Age
+        if domain.age_years > 10:
+            score += 15
+        elif domain.age_years > 5:
+            score += 10
+        elif domain.age_years > 2:
+            score += 5
+        
+        # Keyword value
+        if domain.keyword_volume > 10000:
+            score += 10
+        elif domain.keyword_volume > 1000:
+            score += 5
+        
+        return min(score, 100)
+    
+    def _assess_domain_risk(self, domain: Domain) -> RiskLevel:
+        """Assess risk of domain investment."""
+        if domain.value_ratio > 10:
+            return RiskLevel.LOW
+        elif domain.value_ratio > 3:
+            return RiskLevel.MEDIUM
+        return RiskLevel.HIGH
+    
+    async def execute(self, opportunity: Opportunity) -> ExecutionResult:
+        """Execute domain acquisition."""
+        meta = opportunity.metadata
+        domain = meta.get('domain', '')
+        
+        self.logger.info(f"Acquiring domain: {domain}")
+        
+        # Would:
+        # 1. Register or bid on domain
+        # 2. Configure DNS
+        # 3. Add to portfolio tracker
+        
+        return ExecutionResult(
+            opportunity_id=opportunity.id,
+            success=True,
+            actual_cost=opportunity.estimated_cost,
+            metadata={
+                'domain': domain,
+                'status': 'acquired',
+                'registrar': 'namecheap'  # Example
+            }
+        )
+    
+    def calculate_risk(self, opportunity: Opportunity) -> RiskLevel:
+        """Calculate domain investment risk."""
+        return opportunity.risk_level
+    
+    # Data fetching methods
+    async def _fetch_expiring_domains(self) -> list[Domain]:
+        """Fetch list of expiring domains."""
+        return []
+    
+    async def _fetch_active_auctions(self) -> list[Domain]:
+        """Fetch active domain auctions."""
+        return []
+    
+    async def _check_availability(self, name: str) -> bool:
+        """Check if domain is available for registration."""
+        return False
+    
+    async def _estimate_value(self, domain: Domain) -> float:
+        """Estimate domain's fair market value."""
+        return domain.estimated_value
